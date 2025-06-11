@@ -17,9 +17,9 @@ meixner_pdf <- function(x, alpha, beta, delta) {
 
 
 # --- Parameters ---
-alpha <- 1.7
-beta <- 0.1
-delta <- 0.9
+alpha <- 0.3977
+beta <- -1.4940
+delta <- 0.3462
 
 # --- Accept-Reject Sampling with AcceptReject package ---
 set.seed(7914)
@@ -28,7 +28,7 @@ meixner_samples <- AcceptReject::accept_reject(
   f = meixner_pdf,
   continuous = TRUE,
   args_f = list(alpha=alpha, beta=beta, delta=delta),
-  xlim = c(-1000, 1000)
+  xlim = c(-100, 100)
 )
 
 # --- Plot 1: Histogram with True PDF Overlay ---

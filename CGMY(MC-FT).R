@@ -5,16 +5,16 @@
 library(pracma)
 
 # --- CGMY Parameters (Set I in paper) ---
-C <- 0.5
-G <- 2.0
-M <- 3.5
-Y <- 0.5
+C <- 0.0244
+G <- 0.0765
+M <- 7.5515
+Y <- 1.2945
 Delta <- 1      # time increment
 
 # --- Numerical parameters ---
-N <- 2^10       # number of grid points (FFT resolution)
-L <- 189         # Fourier domain truncation
-D <- 13.9          # support of real space [-D/2, D/2]
+N <- 2^13       # number of grid points (FFT resolution)
+L <- 555        # Fourier domain truncation
+D <- 30.1          # support of real space [-D/2, D/2]
 
 h <- L / N                      # spacing in Fourier domain
 delta <- D / N                 # spacing in real domain
@@ -36,6 +36,7 @@ phi_reg[nonzero_u] <- -(1 - cos(u[nonzero_u] * D)) * phi_u[nonzero_u] / (1i * u[
 phi_reg[!nonzero_u] <- 0
 
 # Numerical evaluation of CDF using FFT
+F_d = 0
 for (l in 1:N) {
   sum = 0
   for (j in 1:N) {
@@ -54,8 +55,8 @@ u_samples <- runif(n_samples)
 x_samples <- approx(F_cdf, x, xout = u_samples, rule = 2)$y
 
 # --- Plot ---
-hist(x_samples, breaks = 200, freq = FALSE, col = "lightblue",
+hist(x_samples, breaks = 200, probability = TRUE, col = "lightblue",
      main = "CGMY Increments via Algorithm A (MC-FT1)",
      xlab = "x")
 lines(x, diff(c(0, F_cdf)) / delta, col = "red", lwd = 2)
-legend("topright", legend = c("Simulated", "Numerical PDF"), col = c("lightblue", "red"), lwd = 2)
+legend("topright", legend = c("Simulated", "Numerical PDF"), col = c("lightblue", "red"), lwd = 2,cex=0.5)
