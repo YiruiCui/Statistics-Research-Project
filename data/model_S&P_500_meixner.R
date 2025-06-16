@@ -1,6 +1,3 @@
-# Required package for higher moments
-if (!require(e1071)) install.packages("e1071")
-library(e1071)
 library(here)  # Load {here} package for file path management
 
 # Identify project location
@@ -8,7 +5,7 @@ here::i_am("data/model_S&P_500_ghyp.R")
 
 # --- Step 1: Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
-price_vector <- data$Last_Price[18080:nrow(data)]
+price_vector <- data$Last_Price[23112:nrow(data)]
 
 # --- Step 2: Compute log-returns ---
 log_returns <- diff(log(price_vector))
@@ -16,8 +13,11 @@ log_returns <- diff(log(price_vector))
 # --- Empirical moments ---
 mu_emp <- mean(log_returns)
 sigma2_emp <- var(log_returns)
-skew_emp <- skewness(log_returns)
-kurt_emp <- kurtosis(log_returns) + 3  # e1071 returns excess kurtosis
+sigma_emp <- sqrt(sigma2_emp)
+mu3 <- mean((log_returns - mu_emp)^3)
+mu4 <- mean((log_returns - mu_emp)^4)
+skew_emp <- mu3 / sigma2_emp^(3/2)
+kurt_emp <- mu4 / sigma2_emp^2
 
 # Display
 cat("Estimated Moments:\n")
@@ -35,48 +35,26 @@ meixner_pdf <- function(x, alpha, beta, delta) {
   return(density)
 }
 
-# --- Moment matching for Meixner parameters ---
-estimate_meixner <- function(m, s2, skew, kurt) {
-  loss_fn <- function(par) {
-    alpha <- par[1]
-    beta <- par[2]
-    delta <- par[3]
-    if (delta <= 0 || alpha <= 0 || abs(beta) >= pi) return(1e6)
-    
-    mu_th <- alpha * delta * tan(beta / 2)
-    var_th <- 0.5 * alpha^2 * delta / cos(beta / 2)^2
-    skew_th <- sin(beta / 2) * sqrt(2 / delta)
-    kurt_th <- 3 + (2 - cos(beta)) / delta
-    
-    sum((c(mu_th, var_th, skew_th, kurt_th) - c(m, s2, skew, kurt))^2)
-  }
-  
-  # Initial guesses
-  start <- c(0.0559, -0.15065, 0.09638)
-  result <- optim(start, loss_fn, method = "L-BFGS-B",
-                  lower = c(1e-4, -pi + 1e-4, 1e-4),
-                  upper = c(100, pi - 1e-4, 100))
-  
-  names(result$par) <- c("alpha", "beta", "delta")
-  return(result$par)
+# --- Meixner PDF with location parameter m ---
+meixner_pdf_m <- function(x, m, a, b, d) {
+  z <- (x - m) / a
+  density <- meixner_pdf(z, alpha = 1, beta = b, delta = d)
+  return(density / a)
 }
 
-# Run estimation
-meixner_par <- estimate_meixner(mu_emp, sigma2_emp, skew_emp, kurt_emp)
-print(meixner_par)
-
 # --- Estimate Meixner parameters ---
-delta <- meixner_par[3] # (2-0.9886723)/(kurt_emp-3)  
-beta <- meixner_par[2] # 2*asin(skew_emp/sqrt(2/delta))  
-alpha <- meixner_par[1] # sqrt(2*sigma2_emp / delta)*cos(beta/2)#0.06 
+delta <- 1/ (kurt_emp - skew_emp^2 - 3)  
+beta <- sign(skew_emp) * acos(2 - delta * (kurt_emp - 3))  
+alpha <- sigma_emp * sqrt((cos(beta)+1)/delta)
+m <- mu_emp - alpha * delta * tan(beta/2)
 
 # --- Step 5: Plot comparison ---
-hist(log_returns, breaks = 200, probability = TRUE, col = "lightblue",
+hist(log_returns, breaks = 100, probability = TRUE, col = "lightblue",
      main = "S&P 500 Log-Returns vs Meixner Fit", xlab = "Log-Return")
 
 # Compute Meixner PDF over the range of histogram
 x_vals <- seq(min(log_returns), max(log_returns), length.out = 1000)
-pdf_vals <- meixner_pdf(x_vals, alpha, beta, delta)
+pdf_vals <- meixner_pdf_m(x_vals, m, alpha, beta, delta)
 
 # Overlay the Meixner PDF
 lines(x_vals, pdf_vals, col = "red", lwd = 2)

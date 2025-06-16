@@ -4,7 +4,7 @@ library(e1071)
 library(here)  # Load {here} package for file path management
 
 # Identify project location
-here::i_am("data/model_S&P_500_ghyp.R")
+here::i_am("data/model_S&P_500_CGMY.R")
 
 # --- Step 1: Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
@@ -64,7 +64,7 @@ Y <- 1.9972  #CGMY_par[4]
 Delta <- 1      # time increment
 
 # --- Numerical parameters ---
-N <- 2^13       # number of grid points (FFT resolution)
+N <- 2^12       # number of grid points (FFT resolution)
 L <- 555        # Fourier domain truncation
 D <- 30.1          # support of real space [-D/2, D/2]
 
