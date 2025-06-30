@@ -4,17 +4,17 @@ library(here)  # Load {here} package for file path management
 here::i_am("data/model_SP500_option_price.R")
 
 # --- Load market data ---
-data <- readr::read_csv(here("data", "SP500_10.06.2025_options.csv"))
-data <- data[1:102,]
+data <- readr::read_csv(here("data", "SP500_Options_book.csv"))
+#data <- data[22:102,]
 market_prices <- data$Last
 K_vec <- data$Strike
 T_days <- data$T
 T_years <- T_days / 252  # convert to years (252 trading day)
 
 # --- Define parameters  ---
-r <- 0.042     # risk-free rate
-q <- 0.013
-S0 <- 6038.81    # current index price 
+r <- 0.019     # risk-free rate
+q <- 0.012
+S0 <- 1124.47    # current index price 
 alpha_cm = 0.75
 
 phi_m1 <- (cos(beta / 2) / cosh((alpha * (-1i) - 1i * beta) / 2))^(2 * delta)
@@ -26,7 +26,7 @@ meixner_cf <- function(u) {
   phi <- (numerator / denominator)^(2 * delta)
   return(phi)
 }
-mu_rn <- m + r - q - log(meixner_cf(-1i))  #2*delta*(log(cos(beta/2)/cos((alpha+beta)/2)))  # drift adjustment
+mu_rn <- m + r - q - log(meixner_cf(-1i))  # drift adjustment
 
 meixner_cf_rn <- function(u, T) {
   phi_raw <- (cos(beta / 2) / cosh((alpha * u - 1i * beta) / 2))^(2 * delta)
@@ -57,7 +57,7 @@ carr_madan_call <- function(K, T, alpha = 0.75) {
   }
   
   # Numerical integration over v ∈ [0, ∞)
-  integral <- integrate(integrand, lower = 0, upper = 10000, subdivisions = 1e4, rel.tol = 1e-6)$value
+  integral <- integrate(integrand, lower = 0, upper = Inf, subdivisions = 1e4, rel.tol = 1e-6)$value
   price <- exp(-alpha * logK) / pi * integral
   return(price)
 }
@@ -70,7 +70,7 @@ compute_pi1 <- function(K,T) {
     den <- 1i * u * meixner_cf_rn(-1i,T)
     Re(num / den)
   }
-  integral <- integrate(integrand, lower = 0, upper = 10000, subdivisions=10000, rel.tol = 1e-6)$value
+  integral <- integrate(integrand, lower = 0, upper = Inf, subdivisions=10000, rel.tol = 1e-6)$value
   return(0.5 + (1 / pi) * integral)
 }
 
@@ -78,7 +78,7 @@ compute_pi2 <- function(K,T) {
   integrand <- function(u) {
     Re(exp(-1i * u * log(K)) * meixner_cf_rn(u,T) / (1i * u))
   }
-  integral <- integrate(integrand, lower = 0, upper = 10000, subdivisions=10000, rel.tol = 1e-6)$value
+  integral <- integrate(integrand, lower = 0, upper = Inf, subdivisions=10000, rel.tol = 1e-6)$value
   return(0.5 + (1 / pi) * integral)
 }
 
@@ -99,7 +99,7 @@ result_df <- data.frame(Strike = K_vec,
                         Market = data$Last,
                         Model = model_prices)
 
-# --- Plot result for one maturity (e.g., T = 17 days) ---
+# --- Plot result for one maturity ---
 library(ggplot2)
 ggplot(subset(result_df), aes(x = Strike)) +
   geom_point(aes(y = Market), color = "black", shape = 1) +

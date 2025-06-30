@@ -6,18 +6,21 @@ library(here)
 library(readr)
 library(ggplot2)
 
-# --- Load option data ---
-here::i_am("data/model_S&P_500_ghyp.R")
-data <- read_csv(here("data", "SP500_03.06.2025_EU_options.csv"))
+# Identify project location
+here::i_am("data/model_SP500_option_price_Esscher.R")
+
+# --- Load market data ---
+data <- readr::read_csv(here("data", "SP500_10.06.2025_options.csv"))
+data <- data[1:102,]
+market_prices <- data$Last
 K_vec <- data$Strike
 T_days <- data$T
-T_years <- T_days / 252
-market_prices <- data$Last
+T_years <- T_days / 252  # convert to years (252 trading day)
 
-# --- Market conditions ---
-S0 <- 5970.37
-r <- 0.042
-q <- 0.013
+# --- Define parameters  ---
+r <- 0.041     # risk-free rate
+q <- 0.015
+S0 <- 6038.81    # current index price 
 
 # --- Risk-neutral Meixner CF generator (returns a function of u) ---
 make_meixner_cf <- function(alpha, beta, delta, S0, r, q, T) {

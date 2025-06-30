@@ -7,17 +7,17 @@ library(ggplot2)
 here::i_am("data/model_SP500_option_price_Esscher.R")
 
 # --- Load market data ---
-data <- readr::read_csv(here("data", "SP500_10.06.2025_options.csv"))
-data <- data[1:102,]
+data <- readr::read_csv(here("data", "SP500_Options_book.csv"))
+#data <- data[1:102,]
 market_prices <- data$Last
 K_vec <- data$Strike
 T_days <- data$T
 T_years <- T_days / 252  # convert to years (252 trading day)
 
 # --- Define parameters  ---
-r <- 0.041     # risk-free rate
-q <- 0.015
-S0 <- 6038.81    # current index price 
+r <- 0.019     # risk-free rate
+q <- 0.012
+S0 <- 1124.47    # current index price 
 
 # ------------------ Esscher-Transformed Meixner Pricing ------------------
 
