@@ -107,4 +107,4 @@ hist(log_returns, breaks = 100, probability = TRUE, col = "lightblue",
 # Overlay the CGMY PDF
 lines(x, diff(c(0, F_cdf)) / delta, col = "red", lwd = 2)
 
-legend("topright", legend = c("Empirical", "CGMY Fit"), col = c("lightblue", "red"), lwd = 2, cex = 0.5)
+legend("topright", legend = c("Empirical", "NIG Fit"), col = c("lightblue", "red"), lwd = 2, cex = 0.5)

@@ -3,8 +3,8 @@
 # ----------------------------------------------
 
 # --- Install required package ---
-if (!require(ghyp)) install.packages("ghyp")
 library(ghyp)
+library(tidyverse)
 library(here)  # Load {here} package for file path management
 
 # Identify project location
@@ -25,7 +25,34 @@ gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 summary(gh_fit)
 
 # --- Step 5: Plot comparison ---
-hist(log_returns, breaks = 100, probability = TRUE, col = "lightblue",
-     main = "S&P 500 Log-Returns vs GH/CGMY Fit", xlab = "Log-Return")
+png(filename = here("outputs", "GH_fit01.png"), width = 2000, height = 1200, res = 300)
+
+hist(log_returns, breaks = 150, probability = TRUE, col = "lightblue", main = "S&P 500 Log-Returns vs GH Fit", xlab = "Log-Return")
 curve(dghyp(x, gh_fit), add = TRUE, col = "red", lwd = 2)
-legend("topright", legend = c("Empirical", "CGMY Fit"), col = c("lightblue", "red"), lwd = 2)
+legend("topright", legend = c("Empirical", "GH Fit"), col = c("lightblue", "red"), lwd = 2, cex = 1)
+
+dev.off()
+
+# --- Step 6: Q–Q plot for GH fit ---
+png(filename = here("outputs", "GH_QQplot.png"), width = 2000, height = 1200, res = 300)
+
+# Sort empirical data
+log_returns_sorted <- sort(log_returns)
+n <- length(log_returns_sorted)
+
+# Compute probabilities
+p_vals <- ppoints(n)  # Generates evenly spaced probabilities
+
+# Compute theoretical quantiles from fitted GH distribution
+q_theoretical <- qghyp(p_vals, object = gh_fit)
+
+# Plot Q–Q
+plot(q_theoretical, log_returns_sorted,
+     main = "Q–Q Plot: GH Fit vs Empirical Returns",
+     xlab = "Theoretical Quantiles (GH)",
+     ylab = "Empirical Quantiles",
+     pch = 16, col = "darkblue", cex = 0.6)
+abline(0, 1, col = "red", lwd = 2)
+
+dev.off()
+
