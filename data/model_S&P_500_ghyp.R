@@ -22,6 +22,7 @@ log_returns <- diff(log(price_vector))
 gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 
 # --- Step 4: Output fitted parameters ---
+gh_params <- unlist(coef(gh_fit))
 summary(gh_fit)
 
 # --- Step 5: Plot comparison ---

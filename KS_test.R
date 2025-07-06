@@ -1,12 +1,33 @@
-# Meixner CDF via numerical integration of PDF
-meixner_cdf <- function(q, m, a, b, d) {
-  sapply(q, function(x) {
-    integrate(meixner_pdf_m, lower = -10, upper = x, m = m, a = a, b = b, d = d)$value
-  })
-}
-log_returns_jittered <- jitter(log_returns, amount = 1e-8)
-# KS Test: log-returns vs fitted Meixner CDF
-ks_result <- ks.test(log_returns_jittered, function(x) meixner_cdf(x, m = m, a = alpha, b = beta, d = delta))
+library(KSgeneral)
+library(twosamples)
+# --- Accept-Reject Sampling with AcceptReject package ---
+set.seed(7914)
+meixner_samples <- AcceptReject::accept_reject(
+  n = 10000L,
+  f = meixner_pdf_m,
+  continuous = TRUE,
+  args_f = list(m=m, a=alpha, b=beta, d=delta),
+  xlim = c(-100, 100)
+)
 
-# Print result
-print(ks_result)
+# Computes p-value of two-sided KS test: log-returns vs fitted Meixner samples
+KS2sample(log_returns, meixner_samples, conservative = T)
+
+# Two-sample Kuiper test
+kuiper_mexiner = kuiper_test(log_returns, meixner_samples)
+summary(kuiper_mexiner)
+#Kuiper2sample(log_returns, meixner_samples, conservative = T)
+
+gh_samples <- rghyp(10000, 
+                    object = ghyp(lambda = gh_params[1], 
+                                  alpha = gh_params[2], 
+                                  mu = gh_params[3], 
+                                  sigma = gh_params[4], 
+                                  gamma = gh_params[5])
+                    )
+# Computes p-value of two-sided KS test: log-returns vs fitted GH samples
+KS2sample(log_returns, gh_samples, conservative = F)
+
+# Two-sample Kuiper test
+kuiper_gh = kuiper_test(log_returns, meixner_samples)
+summary(kuiper_gh)
