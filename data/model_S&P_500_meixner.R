@@ -63,6 +63,12 @@ cdf_vals <- meixner_cdf_m(x_grid, m, alpha, beta, delta)
 # Approximate inverse CDF (quantile function)
 meixner_qf_m <- approxfun(cdf_vals, x_grid, rule = 2)  # Use interpolation
 
+loglik_meixner <- sum(log(meixner_pdf_m(log_returns, m, alpha, beta, delta)))
+k_meixner <- 4  # m, a, b, d
+aic_meixner <- -2 * loglik_meixner + 2 * k_meixner
+cat("AIC - Meixner:", aic_meixner, "\n")
+
+
 # --- Step 5: Plot comparison ---
 png(filename = here("outputs", "Meixner_fit01.png"), width = 2000, height = 1200, res = 300)
 
@@ -75,7 +81,7 @@ pdf_vals <- meixner_pdf_m(x_vals, m, alpha, beta, delta)
 # Overlay the Meixner PDF
 lines(x_vals, pdf_vals, col = "red", lwd = 2)
 
-legend("topright", legend = c("Empirical", "Meixner Fit"), col = c("lightblue", "red"), lwd = 2, cex = 1)
+legend("topright", legend = c("Empirical", "Meixner Fit"), col = c("lightblue", "red"), lwd = 2, cex = 0.5)
 
 dev.off()
 

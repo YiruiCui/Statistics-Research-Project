@@ -5,14 +5,14 @@
 library(pracma)
 
 # --- CGMY Parameters (Set I in paper) ---
-C <- 0.0244
-G <- 0.0765
-M <- 7.5515
-Y <- 1.2945
+C <- 0.0004375748
+G <- 2.5819965259
+M <- 5.3868028356
+Y <- 1.2905476452
 Delta <- 1      # time increment
 
 # --- Numerical parameters ---
-N <- 2^13       # number of grid points (FFT resolution)
+N <- 2^12       # number of grid points (FFT resolution)
 L <- 555        # Fourier domain truncation
 D <- 30.1          # support of real space [-D/2, D/2]
 

@@ -1,7 +1,14 @@
+library(stats4)
+
 # --- CGMY Characteristic Function ---
 cgmy_cf <- function(u, C, G, M, Y, t = 1) {
   psi <- C * gamma(-Y) * ((M - 1i * u)^Y - M^Y + (G + 1i * u)^Y - G^Y)
   exp(t * psi)
+}
+
+# --- CGMY with drift term Characteristic Function ---
+cgmy_cf_m <- function(u, C, G, M, Y, m) {
+  cgmy_cf(u, C, G, M, Y, t = 1) * exp(1i * u * m)
 }
 
 # --- COS Density Approximation ---
@@ -37,7 +44,7 @@ get_cumulant_range <- function(C, G, M, Y, L = 10) {
 }
 
 
-loglik_cgmy <- function(C, G, M, Y) {
+loglik_cgmy <- function(C, G, M, Y, m) {
   # Return a large penalty if parameters are invalid
   if (C <= 0 || G <= 0 || M <= 0 || Y <= 0 || Y >= 2) return(1e6)
   
@@ -47,13 +54,19 @@ loglik_cgmy <- function(C, G, M, Y) {
   b <- 0.5 #range["b"]
   
   # Define characteristic function with current parameters
-  cf <- function(u) cgmy_cf(u, C, G, M, Y)
+  cf <- function(u) cgmy_cf_m(u, C, G, M, Y, m)
   
   # Estimate density using COS method
   x_vals <- seq(a, b, length.out = 1000)
-  dens_vals <- cos_density(x_vals, cf, a, b, N = 256)
+  dens_vals <- cos_density(x_vals, cf, a, b, N = 1024)
   pdf_func <- approxfun(x_vals, dens_vals, rule = 2)  # interpolation
-  
+  if (min(dens_vals) < 0){
+    #print(C)
+    #print(G)
+    #print(M)
+    #print(Y)
+    #print(min(dens_vals))
+  }
   dens <- pdf_func(log_returns)
   
   # If any density is non-positive or non-finite, return penalty
@@ -62,25 +75,70 @@ loglik_cgmy <- function(C, G, M, Y) {
   return(-sum(log(dens)))
   # Compute log-likelihood over observed returns
   #ll_vals <- log(pdf_func(log_returns) + 1e-10)  # avoid log(0)
-  return(-sum(ll_vals))  # negative log-likelihood for MLE
+  #return(-sum(ll_vals))  # negative log-likelihood for MLE
 }
 
 # --- fit CGMY ---
-fit <- mle(loglik_cgmy,
-           start = list(C = 0.02, G = 0.1, M = 5, Y = 1.3),
+fit_cgmy <- mle(loglik_cgmy,
+           start = list(C = 0.002, G = 23, M = 23, Y = 1.5, m = 0.01),
            method = "L-BFGS-B",
-           lower = c(1e-6, 1e-3, 1e-3, 0.1),
-           upper = c(1, 10, 20, 1.99))
+           lower = c(1e-6, 1e-3, 1e-3, 0.1, -0.1),
+           upper = c(1, 100, 100, 1.99, 0.1),
+           control = list(maxit = 1000, parscale = rep(0.1, 5))
+          )
+summary(fit_cgmy)
+aic_cgmy <- AIC(fit_cgmy)
+cat("AIC - CGMY:", aic_cgmy, "\n")
 
-summary(fit)
 
 # Extract parameters
-params <- coef(fit)
-cf_fit <- function(u) cgmy_cf(u, params["C"], params["G"], params["M"], params["Y"])
+params <- coef(fit_cgmy)
+cf_fit <- function(u) cgmy_cf_m(u, params["C"], params["G"], params["M"], params["Y"], params["m"])
 x_vals <- seq(-0.5, 0.5, length.out = 1000)
 dens_fit <- cos_density(x_vals, cf_fit, a = -0.5, b = 0.5)
 
 # Plot
-hist(log_returns, breaks = 100, probability = TRUE, col = "gray", border = NA,
+png(filename = here("outputs", "CGMY_fit01.png"), width = 2000, height = 1200, res = 300)
+
+hist(log_returns, breaks = 200, probability = TRUE, col = "gray", border = NA,
      main = "CGMY Fit to S&P 500 Log Returns", xlab = "Log return")
 lines(x_vals, dens_fit, col = "red", lwd = 2)
+
+dev.off()
+
+# Grid and density
+a <- -1
+b <- 1
+x_vals <- seq(a, b, length.out = 10000)
+dens_vals <- cos_density(x_vals, cf_fit, a, b, N = 1024)
+
+# Compute CDF from density
+dx <- diff(x_vals)[1]
+cdf_vals <- cumsum(dens_vals) * dx
+cdf_vals <- cdf_vals / max(cdf_vals)  # normalize to [0,1]
+
+# Interpolation function for inverse CDF (quantile function)
+cgmy_quantile <- approxfun(cdf_vals, x_vals, rule = 2)
+
+# Compute empirical quantiles
+empirical_q <- sort(log_returns)
+
+# Uniform quantiles (same length)
+p_vals <- ppoints(length(empirical_q))
+
+# Theoretical quantiles from CGMY
+theoretical_q <- cgmy_quantile(p_vals)
+
+library(ggplot2)
+qq_data <- data.frame(Theoretical = theoretical_q, Empirical = empirical_q)
+
+png(filename = here("outputs", "CGMY_QQplot.png"), width = 2000, height = 1200, res = 300)
+
+ggplot(qq_data, aes(x = Theoretical, y = Empirical)) +
+  geom_point(color = "steelblue", alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "QQ Plot: Fitted CGMY vs Empirical Log-Returns",
+       x = "Theoretical Quantiles (CGMY)", y = "Empirical Quantiles") +
+  theme_minimal()
+
+dev.off()

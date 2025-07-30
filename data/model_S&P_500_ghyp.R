@@ -24,6 +24,8 @@ gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 # --- Step 4: Output fitted parameters ---
 gh_params <- unlist(coef(gh_fit))
 summary(gh_fit)
+aic_gh <- AIC(gh_fit)
+cat("AIC - GH:", aic_gh, "\n")
 
 # --- Step 5: Plot comparison ---
 png(filename = here("outputs", "GH_fit01.png"), width = 2000, height = 1200, res = 300)
