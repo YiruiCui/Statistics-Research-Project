@@ -1,3 +1,15 @@
+library(here)  # Load {here} package for file path management
+
+# Identify project location
+here::i_am("analysis/model_S&P_500_Kou_DEJD.R")
+
+# --- Load daily price data ---
+data <- readr::read_csv(here("data", "SP500.csv"))
+price_vector <- data$Last_Price[18080:nrow(data)]
+
+# --- Compute log-returns ---
+log_returns <- diff(log(price_vector))
+
 # Negative Log-Likelihood Function
 loglik_de <- function(p, eta1, eta2) {
   if (p <= 0 || p >= 1 || eta1 <= 0 || eta2 <= 0) return(1e6)

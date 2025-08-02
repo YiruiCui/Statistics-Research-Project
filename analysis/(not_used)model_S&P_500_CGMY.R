@@ -4,7 +4,7 @@ library(e1071)
 library(here)  # Load {here} package for file path management
 
 # Identify project location
-here::i_am("data/model_S&P_500_CGMY.R")
+here::i_am("analysis/model_S&P_500_CGMY.R")
 
 # --- Step 1: Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))

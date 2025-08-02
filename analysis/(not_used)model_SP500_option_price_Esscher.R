@@ -4,7 +4,7 @@ library(readr)
 library(ggplot2)
 
 # Identify project location
-here::i_am("data/model_SP500_option_price_Esscher.R")
+here::i_am("analysis/model_SP500_option_price_Esscher.R")
 
 # --- Load market data ---
 data <- readr::read_csv(here("data", "SP500_Options_book.csv"))

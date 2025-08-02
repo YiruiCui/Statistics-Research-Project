@@ -1,13 +1,13 @@
 library(here)  # Load {here} package for file path management
 
 # Identify project location
-here::i_am("data/model_S&P_500_meixner.R")
+here::i_am("analysis/model_S&P_500_meixner.R")
 
-# --- Step 1: Load daily price data ---
+# --- Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
 price_vector <- data$Last_Price[18080:nrow(data)]
 
-# --- Step 2: Compute log-returns ---
+# --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
 # --- Empirical moments ---

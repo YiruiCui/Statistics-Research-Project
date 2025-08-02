@@ -1,7 +1,7 @@
 library(here)  # Load {here} package for file path management
 
 # Identify project location
-here::i_am("data/model_SP500_option_price.R")
+here::i_am("analysis/model_SP500_option_price.R")
 
 # --- Load market data ---
 data <- readr::read_csv(here("data", "SP500_Options_book.csv"))
