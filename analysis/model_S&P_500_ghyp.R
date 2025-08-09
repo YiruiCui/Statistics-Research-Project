@@ -24,6 +24,7 @@ gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 # --- Step 4: Output fitted parameters ---
 gh_params <- unlist(coef(gh_fit))
 summary(gh_fit)
+coef(gh_fit, type = "alpha.delta")
 aic_gh <- AIC(gh_fit)
 cat("AIC - GH:", aic_gh, "\n")
 

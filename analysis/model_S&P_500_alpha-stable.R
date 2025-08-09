@@ -90,25 +90,26 @@ loglik_stable_sym <- function(alpha, c, mu) {
   return(-sum(log(dens)))
 }
 
-fit_stable_mle <- mle(loglik_stable_sym,
-                  start = list(alpha = 1.7, c = 0.01, mu = 0),
-                  method = "L-BFGS-B",
-                  lower = c(0.1, 1e-4, -1),
-                  upper = c(2, 1, 1),
-                  control = list(maxit = 1000, parscale = c(0.1, 0.001, 0.1)))
+#fit_stable_mle <- mle(loglik_stable_sym,
+#                  start = list(alpha = 1.7, c = 0.01, mu = 0),
+#                  method = "L-BFGS-B",
+#                  lower = c(0.1, 1e-4, -1),
+#                  upper = c(2, 1, 1),
+#                  control = list(maxit = 1000, parscale = c(0.1, 0.001, 0.1)))
 
-#fit_stable_mle <- mle(loglik_stable,
-#                      start = list(alpha = 1.7, c = 0.01, beta = 0, mu = 0),
-#                      method = "L-BFGS-B",
-#                      lower = c(0.1, 1e-4, -1, -1),
-#                      upper = c(2, 1, 1, 1),
-#                      control = list(maxit = 1000, parscale = c(0.1, 0.001, 0.1, 0.1)))
+fit_stable_mle <- mle(loglik_stable,
+                      start = list(alpha = 1.7, c = 0.01, beta = 0, mu = 0),
+                      method = "L-BFGS-B",
+                      lower = c(0.1, 1e-4, -1, -1),
+                      upper = c(2, 1, 1, 1),
+                      control = list(maxit = 1000, parscale = c(0.1, 0.001, 0.1, 0.1)))
 
 # Extract parameters
 params_stable <- coef(fit_stable_mle)
 alpha_stable <- params_stable[1]
 c_stable <- params_stable[2]
-mu_stable <- params_stable[3]
+beta_stable <- params_stable[3]
+mu_stable <- params_stable[4]
 
 aic_stable <- AIC(fit_stable_mle)
 cat("AIC - α-Stable:", aic_stable, "\n")
@@ -120,7 +121,7 @@ library(stabledist)  # for dstable
 x_vals <- seq(min(log_returns), max(log_returns), length.out = 1000)
 dens_vals <- dstable(x_vals, alpha_stable, 0, c_stable, mu_stable)
 
-png(filename = here("outputs", "stable_sym_fit01.png"), width = 2000, height = 1200, res = 300)
+png(filename = here("outputs", "stable_fit01.png"), width = 2000, height = 1200, res = 300)
 
 hist(log_returns, breaks = 100, probability = TRUE,
      col = "lightgray", main = "S&P 500 Log-Returns vs α-Stable MLE",
