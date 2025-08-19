@@ -1,6 +1,7 @@
 library(here)
 library(tidyverse)
 library(ghyp)
+library(gridExtra)
 
 set.seed(7914) # For reproducibility
 
@@ -14,6 +15,45 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
+# --- BNS Simulation Function ---
+simulate_bns_gamma_sv <- function(params, n_steps, dt) {
+  # Unpack parameters from the input vector
+  mu        <- params[1]
+  rho       <- params[2]
+  lambda    <- params[3]
+  a         <- params[4]
+  b         <- params[5]
+  sigma0_sq <- params[6]
+  
+  log_S <- numeric(n_steps + 1)
+  sigma_sq <- numeric(n_steps + 1)
+  log_S[1] <- 0
+  sigma_sq[1] <- sigma0_sq
+  
+  num_jumps <- rpois(n_steps, lambda * a * dt)
+  bdlp_increments <- sapply(num_jumps, function(nj) {
+    if (nj == 0) return(0)
+    # The total increment is the sum of the individual exponential jumps
+    sum(rgamma(nj, shape = 1, rate = b))
+  })
+  
+  dW <- rnorm(n_steps, mean = 0, sd = sqrt(dt))
+  
+  # --- Euler-Maruyama Discretization using the correct BDLP ---
+  for (t in 1:n_steps) {
+    sigma_sq_prev <- max(1e-9, sigma_sq[t])
+    
+    # Update variance process (dσ² = -λσ²dt + dz)
+    sigma_sq[t+1] <- sigma_sq[t] - lambda * sigma_sq_prev * dt + bdlp_increments[t]
+    
+    # Update log-price process (dZ = (μ - σ²/2)dt + σdW + ρdz) [cite: 2491]
+    log_S[t+1] <- log_S[t] + (mu - 0.5 * sigma_sq_prev) * dt + 
+      sqrt(sigma_sq_prev) * dW[t] + 
+      rho * bdlp_increments[t]
+  }
+  
+  return(diff(log_S))
+}
 
 # --- 2. Particle Filter Log-Likelihood Function ---
 # This function approximates the log-likelihood of the data for a given
@@ -30,49 +70,54 @@ particle_filter_log_likelihood <- function(params, data, n_particles) {
   
   n_obs <- length(data)
   log_likelihood <- 0
+  dt <- 1 # Daily data
   
-  # --- Step 1: Initialization ---
-  # Start with a cloud of 'particles' representing possible initial variance values.
-  # We draw from the stationary distribution of the Gamma-OU process if possible,
-  # or simply start them all at the initial guess.
+  # --- Initialization ---
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
   
-  # --- Step 2: Main Loop (Filtering) ---
+  # --- Main Filtering Loop ---
   for (t in 1:n_obs) {
-    # --- Step 2a: Prediction/Propagation ---
-    # Move each particle forward one step in time according to the state equation
-    # (the Gamma-OU process for variance).
-    jump_intensity <- a * lambda * 1 # dt = 1 for daily
-    jumps <- rpois(n_particles, jump_intensity)
-    jump_sizes <- sapply(jumps, function(nj) {
+    # --- Step 1: Prediction/Propagation ---
+    num_jumps <- rpois(n_particles, lambda * a * dt)
+    bdlp_increments <- sapply(num_jumps, function(nj) {
       if (nj == 0) return(0)
+      # The increment is the sum of Gamma(1,b) i.e. Exponential(b) jumps
       sum(rgamma(nj, shape = 1, rate = b))
     })
     
-    particles_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda) + jump_sizes)
+    # Propagate each particle's state (variance) forward using its unique BDLP increment
+    # dσ² = -λσ²dt + dz
+    particles_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt) + bdlp_increments)
     
-    # --- Step 2b: Weighting ---
-    # Calculate the likelihood of observing the actual return data[t] for each particle.
-    # This is the "observation density".
-    # Note: This step can be improved by handling the leverage term more explicitly.
-    # For simplicity here, we use the standard BNS return equation.
-    particle_means <- mu - 0.5 * particles_sigma_sq
-    particle_sds <- sqrt(particles_sigma_sq)
+    # --- Step 2: Weighting ---
     
-    weights <- dnorm(data[t], mean = particle_means, sd = particle_sds, log = TRUE)
+    # CORRECTLY CALCULATE THE WEIGHTS
+    # The weight is the probability of the observed return data[t], conditional
+    # on the particle's variance AND the simulated jump (bdlp_increments).
+    # We use the observation equation:
+    # Return = (μ - σ²/2)dt + σdW + ρdz
+    # So, the Gaussian part is: Return - (μ - σ²/2)dt - ρdz = σdW
+    
+    # This is the mean of the Gaussian component of the return
+    particle_means <- (mu - 0.5 * particles_sigma_sq) * dt + rho * bdlp_increments
+    particle_sds <- sqrt(particles_sigma_sq * dt)
+    
+    # The weight is the density of the observed return under this conditional distribution
+    log_weights <- dnorm(data[t], mean = particle_means, sd = particle_sds, log = TRUE)
     
     # Avoid numerical underflow by shifting log-weights
-    max_log_weight <- max(weights)
-    weights <- exp(weights - max_log_weight)
+    max_log_weight <- max(log_weights)
+    weights <- exp(log_weights - max_log_weight)
     
-    # --- Step 2c: Update Log-Likelihood ---
-    # The likelihood for this time step is the average of the particle weights.
+    # --- Step 3: Update Log-Likelihood & Resample ---
+    if (sum(weights) == 0 || !is.finite(sum(weights))) {
+      # If all weights are zero, the filter has failed. Return a large penalty.
+      return(1e9) 
+    }
+    
     log_likelihood <- log_likelihood + max_log_weight + log(mean(weights))
     
-    # --- Step 2d: Resampling ---
-    # Resample the particles based on their weights. Particles with higher
-    # weights (i.e., those that better explain the data) are more likely to be chosen.
-    # This prevents particle degeneracy.
+    # Resample particles based on their weights
     normalized_weights <- weights / sum(weights)
     indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = normalized_weights)
     particles_sigma_sq <- particles_sigma_sq[indices]
@@ -88,7 +133,7 @@ mle_objective_function <- function(scaled_params, data, n_particles) {
   # Unscale parameters to their natural domain
   params <- numeric(6)
   params[1] <- scaled_params[1]               # mu
-  params[2] <- scaled_params[2]               # rho in (-1, 1)
+  params[2] <- -exp(scaled_params[2])         # rho <=0
   params[3] <- exp(scaled_params[3])          # lambda > 0
   params[4] <- exp(scaled_params[4])          # a > 0
   params[5] <- exp(scaled_params[5])          # b > 0
@@ -111,7 +156,7 @@ mle_objective_function <- function(scaled_params, data, n_particles) {
 # Starting values on the transformed scale
 initial_scaled_params <- c(
   mu = mean(log_returns),
-  rho_trans = -1.0, 
+  rho_trans = log(1.0), 
   log_lambda = log(0.05),
   log_a = log(1.0),
   log_b = log(8000),
@@ -121,7 +166,7 @@ initial_scaled_params <- c(
 # NOTE: Particle filtering is computationally intensive.
 # For a real estimation, n_particles should be higher (e.g., 5000+) and
 # the optimization will take a very long time.
-n_particles <- 1000 
+n_particles <- 10000 
 
 cat("\nStarting MLE optimization via Particle Filter (this will be very slow)...\n")
 mle_results <- optim(
@@ -142,7 +187,7 @@ print(mle_results$par)
 # Transform parameters back to their original scale
 estimated_params_mle <- numeric(6)
 estimated_params_mle[1] <- mle_results$par[1]
-estimated_params_mle[2] <- mle_results$par[2]
+estimated_params_mle[2] <- -exp(mle_results$par[2])
 estimated_params_mle[3] <- exp(mle_results$par[3])
 estimated_params_mle[4] <- exp(mle_results$par[4])
 estimated_params_mle[5] <- exp(mle_results$par[5])

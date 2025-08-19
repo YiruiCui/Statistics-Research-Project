@@ -1,195 +1,202 @@
 library(here)
 library(tidyverse)
 library(ghyp)
+library(SuppDists)
+library(gridExtra)
+library(moments)
 
 set.seed(7914)
 
-# Identify project location
-here::i_am("analysis/model_SP500_BNS(MLE-APF).R")
-
-# --- Load daily price data ---
+# --- Load and Prepare Data ---
+here::i_am("analysis/model_SP500_BNS-IG(MLE-APF_SANN).R")
 data <- readr::read_csv(here("data", "SP500.csv"))
 price_vector <- data$Last_Price[18080:nrow(data)]
-
-# --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
+# --- Fit GH model for comparison plots ---
+gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE, silent = TRUE)
 
-# --- 2. Auxiliary Particle Filter Log-Likelihood Function ---
 
-auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) {
-  # Unpack parameters
+# --- BNS Simulation Function with IG Stochastic Volatility ---
+# (This function is correct and remains unchanged)
+simulate_bns_ig_sv <- function(params, n_steps, dt) {
   mu        <- params[1]
   rho       <- params[2]
   lambda    <- params[3]
-  a         <- params[4]
-  b         <- params[5]
+  a_ig      <- params[4]
+  b_ig      <- params[5]
+  sigma0_sq <- params[6]
+  
+  log_S <- numeric(n_steps + 1)
+  sigma_sq <- numeric(n_steps + 1)
+  log_S[1] <- 0
+  sigma_sq[1] <- sigma0_sq
+  
+  z1_increments <- rinvGauss(n_steps, nu = (a_ig / 2) * dt, lambda = (b_ig^2) * (a_ig / 2) * dt)
+  jump_intensity_z2 <- (a_ig * b_ig / 2) * dt
+  jumps_z2 <- rpois(n_steps, jump_intensity_z2)
+  jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
+    if (nj == 0) return(0)
+    sum((1 / b_ig^2) * (rnorm(nj)^2))
+  })
+  bdlp_increments <- z1_increments + jump_sizes_z2
+  
+  dW <- rnorm(n_steps, mean = 0, sd = sqrt(dt))
+  
+  for (t in 1:n_steps) {
+    sigma_sq_prev <- max(1e-9, sigma_sq[t])
+    d_sigma_sq <- -lambda * sigma_sq_prev * dt + bdlp_increments[t]
+    sigma_sq[t+1] <- sigma_sq_prev + d_sigma_sq
+    d_log_S <- (mu - 0.5 * sigma_sq_prev) * dt + 
+      sqrt(sigma_sq_prev) * dW[t] + 
+      rho * bdlp_increments[t]
+    log_S[t+1] <- log_S[t] + d_log_S
+  }
+  return(diff(log_S))
+}
+
+# --- Auxiliary Particle Filter for BNS with IG-SV ---
+# (This function is correct and remains unchanged)
+apf_log_likelihood_ig <- function(params, data, n_particles) {
+  mu        <- params[1]
+  rho       <- params[2]
+  lambda    <- params[3]
+  a_ig      <- params[4]
+  b_ig      <- params[5]
   sigma0_sq <- params[6]
   
   n_obs <- length(data)
   log_likelihood <- 0
+  dt <- 1
   
-  # --- Initialization ---
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
   
-  # --- Main Loop (Filtering) ---
   for (t in 1:n_obs) {
-    # --- Stage 1: Auxiliary Step ---
-    
-    # 1a. Predict the auxiliary variable: E[sigma_t^2 | sigma_{t-1}^2]
-    # For the Gamma-OU process, this is the mean-reverting part.
-    # We ignore the jump part here as it's an approximation.
-    predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda))
-    
-    # 1b. Calculate first-stage weights based on the observation at time t.
-    # These weights tell us which of the current particles are most likely
-    # to produce a good prediction for the next step.
+    predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
     predicted_means <- mu - 0.5 * predicted_sigma_sq
     predicted_sds <- sqrt(predicted_sigma_sq)
     
     log_first_stage_weights <- dnorm(data[t], mean = predicted_means, sd = predicted_sds, log = TRUE)
-    
-    # Normalize weights to avoid numerical issues
     max_log_weight <- max(log_first_stage_weights)
     first_stage_weights <- exp(log_first_stage_weights - max_log_weight)
     
-    # 1c. First-stage resampling.
-    # We sample the *indices* of the particles that will be propagated.
-    # This focuses our computational effort on promising particles.
-    ancestor_indices <- sample(1:n_particles, 
-                               size = n_particles, 
-                               replace = TRUE, 
-                               prob = first_stage_weights)
+    ancestor_indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = first_stage_weights)
     
-    # --- Stage 2: Propagation and Final Weighting ---
-    
-    # 2a. Propagate the chosen ancestor particles forward one step.
     propagated_particles <- particles_sigma_sq[ancestor_indices]
     
-    jump_intensity <- a * lambda * 1 # dt = 1
-    jumps <- rpois(n_particles, jump_intensity)
-    jump_sizes <- sapply(jumps, function(nj) {
+    z1_increments <- rinvGauss(n_particles, nu = (a_ig / 2) * (lambda*dt), lambda = (b_ig^2) * (a_ig / 2) * (lambda*dt))
+    jump_intensity_z2 <- (a_ig * b_ig / 2) * (lambda*dt)
+    jumps_z2 <- rpois(n_particles, jump_intensity_z2)
+    jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
       if (nj == 0) return(0)
-      sum(rgamma(nj, shape = 1, rate = b))
+      sum((1 / b_ig^2) * (rnorm(nj)^2))
     })
+    bdlp_increments <- z1_increments + jump_sizes_z2
     
-    # This is our new set of particles for time t
-    new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda) + jump_sizes)
+    new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda * dt) + bdlp_increments)
     
-    # 2b. Calculate second-stage weights (importance correction).
-    # These weights correct for the approximation made in Stage 1.
     new_means <- mu - 0.5 * new_particles_sigma_sq
     new_sds <- sqrt(new_particles_sigma_sq)
     
     log_numerator_weights <- dnorm(data[t], mean = new_means, sd = new_sds, log = TRUE)
-    
-    # The denominator is the weight from the particle we chose in the first stage
-    log_denominator_weights <- dnorm(data[t], 
-                                     mean = predicted_means[ancestor_indices], 
-                                     sd = predicted_sds[ancestor_indices], 
-                                     log = TRUE)
+    log_denominator_weights <- dnorm(data[t], mean = predicted_means[ancestor_indices], sd = predicted_sds[ancestor_indices], log = TRUE)
     
     log_second_stage_weights <- log_numerator_weights - log_denominator_weights
-    
-    # Normalize
     max_log_weight2 <- max(log_second_stage_weights)
     second_stage_weights <- exp(log_second_stage_weights - max_log_weight2)
     
-    # 2c. Update the total log-likelihood.
-    # This combines the likelihood from both stages.
-    log_likelihood <- log_likelihood + 
-      log(mean(first_stage_weights)) + 
-      max_log_weight + max_log_weight2 + 
-      log(mean(second_stage_weights))
+    log_likelihood <- log_likelihood + log(mean(first_stage_weights)) + max_log_weight + max_log_weight2 + log(mean(second_stage_weights))
     
-    # 2d. Final resampling.
     final_normalized_weights <- second_stage_weights / sum(second_stage_weights)
-    final_indices <- sample(1:n_particles, 
-                            size = n_particles, 
-                            replace = TRUE, 
-                            prob = final_normalized_weights)
+    if(any(is.na(final_normalized_weights)) || sum(final_normalized_weights) == 0) {
+      final_indices <- sample(1:n_particles, size = n_particles, replace = TRUE)
+    } else {
+      final_indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = final_normalized_weights)
+    }
     
-    # Update the particle cloud for the next iteration
     particles_sigma_sq <- new_particles_sigma_sq[final_indices]
   }
   
-  return(-log_likelihood) # Return negative log-likelihood for minimization
+  return(-log_likelihood)
 }
 
-# --- 3. Define and Run the Optimization ---
-# (The objective function and optimization call would be the same as in the
-# previous script, but would call `auxiliary_particle_filter_log_likelihood`
-# instead of the standard one).
-
-# We can define the objective function
-mle_objective_function_apf <- function(scaled_params, data, n_particles) {
+# --- 3. Define the MLE Objective Function ---
+mle_objective_function_apf_ig <- function(scaled_params, data, n_particles) {
   params <- numeric(6)
   params[1] <- scaled_params[1]
-  params[2] <- -exp(scaled_params[2])
+  params[2] <- scaled_params[2]
   params[3] <- exp(scaled_params[3])
-  params[4] <- exp(scaled_params[4])
-  params[5] <- exp(scaled_params[5])
+  params[4] <- exp(scaled_params[4]) # a_ig
+  params[5] <- exp(scaled_params[5]) # b_ig
   params[6] <- exp(scaled_params[6])
   
-  neg_log_lik <- auxiliary_particle_filter_log_likelihood(params, data, n_particles)
+  neg_log_lik <- apf_log_likelihood_ig(params, data, n_particles)
   
-  cat("Testing Params:", round(params, 4), " | -LogLik (APF):", round(neg_log_lik, 4), "\n")
+  # Note: Progress printing is handled by the `trace` control in optim
   
   if (!is.finite(neg_log_lik)) return(1e9)
   return(neg_log_lik)
 }
 
-# Initial parameters (same as before)
-initial_scaled_params <- c(
+# --- 4. Run the Optimization using Simulated Annealing (SANN) ---
+
+# Initial parameters (these are still important as a starting point)
+initial_scaled_params_ig <- c(
   mu = mean(log_returns),
-  rho_trans = log(0.5), 
+  rho_trans = -0.7, 
   log_lambda = log(0.05),
-  log_a = log(0.1),
-  log_b = log(10),
+  log_a_ig = log(6.0),
+  log_b_ig = log(0.8),
   log_sigma0_sq = log(var(log_returns))
 )
 
 n_particles <- 1000
 
-cat("\nStarting MLE optimization via Auxiliary Particle Filter (this will be very slow)...\n")
-mle_results_apf_gamma <- optim(
-  par = initial_scaled_params,
-  fn = mle_objective_function_apf,
+cat("\nStarting MLE optimization for BNS-IG via Simulated Annealing (this will be very slow)...\n")
+# Using method = "SANN"
+mle_results_apf_ig <- optim(
+  par = initial_scaled_params_ig,
+  fn = mle_objective_function_apf_ig,
   data = log_returns,
   n_particles = n_particles,
-  method = "Nelder-Mead",
-  control = list(maxit = 200, trace = 1)
+  method = "SANN",
+  control = list(
+    maxit = 10000, # SANN needs many more iterations
+    temp = 10,     # Starting temperature - controls initial "jumpiness"
+    tmax = 100,    # Number of function evaluations at each temperature
+    trace = TRUE,  # Print progress
+    REPORT = 500   # Report progress every 500 iterations
+  ) 
 )
 
-# --- 4. Display Results ---
-cat("\n--- APF MLE Optimization Finished ---\n")
+# --- 5. Display Results ---
+cat("\n--- SANN MLE Optimization Finished ---\n")
 print("Optimal Scaled Parameters Found:")
-print(mle_results_apf_gamma$par)
+print(mle_results_apf_ig$par)
 
 # Transform parameters back to their original scale
-estimated_params_mle_apf_gamma <- numeric(6)
-estimated_params_mle_apf_gamma[1] <- mle_results_apf_gamma$par[1]
-estimated_params_mle_apf_gamma[2] <- -exp(mle_results_apf_gamma$par[2])
-estimated_params_mle_apf_gamma[3] <- exp(mle_results_apf_gamma$par[3])
-estimated_params_mle_apf_gamma[4] <- exp(mle_results_apf_gamma$par[4])
-estimated_params_mle_apf_gamma[5] <- exp(mle_results_apf_gamma$par[5])
-estimated_params_mle_apf_gamma[6] <- exp(mle_results_apf_gamma$par[6])
-names(estimated_params_mle_apf_gamma) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
+estimated_params_mle_apf_ig <- numeric(6)
+estimated_params_mle_apf_ig[1] <- mle_results_apf_ig$par[1]
+estimated_params_mle_apf_ig[2] <- mle_results_apf_ig$par[2]
+estimated_params_mle_apf_ig[3] <- exp(mle_results_apf_ig$par[3])
+estimated_params_mle_apf_ig[4] <- exp(mle_results_apf_ig$par[4])
+estimated_params_mle_apf_ig[5] <- exp(mle_results_apf_ig$par[5])
+estimated_params_mle_apf_ig[6] <- exp(mle_results_apf_ig$par[6])
+names(estimated_params_mle_apf_ig) <- c("mu", "rho", "lambda", "a_ig", "b_ig", "sigma0_sq")
 
 print("Optimal Interpretable Parameters (MLE):")
-print(estimated_params_mle_apf_gamma)
+print(estimated_params_mle_apf_ig)
 
-cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_apf_gamma$value, "\n")
+cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_apf_ig$value, "\n")
 
+# --- 6. Simulate and Plot Final Results ---
 cat("\nSimulating final BNS model path with estimated parameters...\n")
-
-bns_returns <- simulate_bns_gamma_sv(
-  params = estimated_params_mle_apf_gamma,
+bns_returns <- simulate_bns_ig_sv(
+  params = estimated_params_mle_apf_ig,
   n_steps = length(log_returns),
   dt = 1
 )
 cat("BNS simulation complete.\n")
-
 
 # --- Comparison Plots ---
 cat("Generating comparison plots...\n")
@@ -296,7 +303,7 @@ print(acf_plot)
 
 ## Save plots
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-APF)&GH_fit.png"),
+  filename = here("outputs", "BNS-IG(MLE-APF_SANN)&GH_fit.png"),
   plot = density_plot_hist_style,
   width = 2000,
   height = 1200,
@@ -305,20 +312,19 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-APF)&GH_QQplot.png"),
+  filename = here("outputs", "BNS-IG(MLE-APF_SANN)&GH_QQplot.png"),
   plot = QQplots,
-  width = 3000,
-  height = 1500,
-  units = "px",
-  dpi = 300
-)
-
-ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-APF)&GH_acf.png"),
-  plot = acf_plot,
   width = 2000,
   height = 1200,
   units = "px",
   dpi = 300
 )
 
+ggsave(
+  filename = here("outputs", "BNS-IG(MLE-APF_SANN)&GH_acf.png"),
+  plot = acf_plot,
+  width = 2000,
+  height = 1200,
+  units = "px",
+  dpi = 300
+)

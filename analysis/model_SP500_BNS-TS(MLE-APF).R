@@ -1,13 +1,15 @@
 library(here)
 library(tidyverse)
 library(ghyp)
+library(stabledist)
 library(gridExtra)
+library(moments)
 library(SuppDists) # For rinvGauss function
 
 set.seed(7914)
 
 # Identify project location
-here::i_am("analysis/model_SP500_BNS-IG(MLE-APF).R")
+here::i_am("analysis/model_SP500_BNS-TS(MLE-APF).R")
 
 # --- Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
@@ -16,17 +18,40 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
-# --- BNS Simulation Function with IG Stochastic Volatility ---
-simulate_bns_ig_sv <- function(params, n_steps, dt) {
-  # Unpack parameters for the BNS model.
-  # Note: For an IG-OU marginal, the volatility process is typically
-  # parameterized by (a, b) for the IG distribution and lambda for mean reversion.
+# --- Function to Simulate Tempered Stable Variates ---
+rts <- function(n, dt, kappa, a, b, K = 1000) {
+  
+  # Use sapply to generate n independent values
+  sapply(1:n, function(i) {
+    # For each increment, we need a fresh set of random numbers
+    e <- rexp(K)
+    u_tilde <- runif(K)
+    b_i <- cumsum(rexp(K, rate = 1))
+    
+    # Calculate the jump sizes. Here, T from the formula is our time step 'dt'.
+    # Since we want the value at the end of the interval, the indicator is always 1.
+    jumps <- pmin(
+      2 * (a * dt / (b_i * gamma(1 - kappa)))^(1 / kappa),
+      (2 * e * u_tilde^(1 / kappa) / b^(1 / kappa))
+    )
+    
+    # The value of the increment is the sum of all K potential jumps
+    sum(jumps)
+  })
+}
+
+
+# --- BNS Simulation Function with TS Stochastic Volatility ---
+simulate_bns_ts_sv <- function(params, n_steps, dt) {
+  # Unpack parameters for the BNS model with TS-SV
+  # TS-OU is parameterized by (kappa, a, b) and lambda for mean reversion.
   mu        <- params[1]
   rho       <- params[2]
   lambda    <- params[3] # Mean-reversion speed for volatility
-  a_ig      <- params[4] # 'a' parameter of the marginal IG(a,b) distribution
-  b_ig      <- params[5] # 'b' parameter of the marginal IG(a,b) distribution
-  sigma0_sq <- params[6] # Initial variance
+  kappa     <- params[4] # TS parameter kappa (0 < kappa < 1)
+  a         <- params[5] # TS parameter 'a'
+  b         <- params[6] # TS parameter 'b'
+  sigma0_sq <- params[7] # Initial variance
   
   # Initialize vectors for the simulation path
   log_S <- numeric(n_steps + 1)
@@ -36,23 +61,24 @@ simulate_bns_ig_sv <- function(params, n_steps, dt) {
   log_S[1] <- 0
   sigma_sq[1] <- sigma0_sq
   
-  # --- Simulate the Background Driving Lévy Process (BDLP) for IG-OU ---
-  # According to Schoutens (2003), Section 5.5.2, the BDLP z is the sum
+  # --- Simulate the Background Driving Lévy Process (BDLP) for TS-OU ---
+  # According to Schoutens (2003), Section 5.5.3, the BDLP z is the sum
   # of two independent Lévy processes: z = z^(1) + z^(2).
   
-  # Component 1: An IG-Lévy process z^(1) with parameters a/2 and b.
-  # We simulate its increments for each time step.
-  z1_increments <- rinvGauss(n_steps, nu = (a_ig / 2) * dt, lambda = (b_ig^2) * (a_ig / 2) * dt)
+  # Component 1: A TS(kappa, kappa*a, b) Lévy process, z^(1)
+  # An increment over dt*lambda has the law of a TS(kappa, kappa*a*lambda*dt, b) variable.
+  # We use our new rts function to simulate these increments.
+  z1_increments <- rts(n_steps, dt=1, kappa = kappa, a = kappa * a * lambda * dt, b = b)
   
-  # Component 2: A compound Poisson process z^(2).
-  # The jump intensity is (a*b)/2.
-  jump_intensity_z2 <- (a_ig * b_ig / 2) * dt
+  # --- Component 2: A compound Poisson process z^(2) ---
+  # Jump intensity is a*b*kappa
+  jump_intensity_z2 <- a * b * kappa * (lambda * dt)
   jumps_z2 <- rpois(n_steps, jump_intensity_z2)
   
-  # The jump sizes are b_ig^-2 * v_n^2, where v_n are standard normal.
+  # Jump sizes are Gamma(1 - kappa, b^(1/kappa) / 2)
   jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
     if (nj == 0) return(0)
-    sum((1 / b_ig^2) * (rnorm(nj)^2))
+    sum(rgamma(nj, shape = 1 - kappa, rate = b^(1/kappa) / 2))
   })
   
   # The total increment of the BDLP at each step
@@ -65,9 +91,8 @@ simulate_bns_ig_sv <- function(params, n_steps, dt) {
   for (t in 1:n_steps) {
     sigma_sq_prev <- max(1e-9, sigma_sq[t]) # Ensure variance is non-negative
     
-    # Update variance process (IG-OU)
+    # Update variance process (TS-OU)
     # d(sigma_t^2) = -lambda * sigma_t^2 * dt + d(z_{lambda*t})
-    # The increment d(z_{lambda*t}) is what we simulated above.
     d_sigma_sq <- -lambda * sigma_sq_prev * dt + bdlp_increments[t]
     sigma_sq[t+1] <- sigma_sq_prev + d_sigma_sq
     
@@ -84,25 +109,26 @@ simulate_bns_ig_sv <- function(params, n_steps, dt) {
   return(diff(log_S))
 }
 
-# --- 2. Auxiliary Particle Filter for BNS with IG-SV ---
+# --- 2. Auxiliary Particle Filter for BNS with TS-SV ---
 
-apf_log_likelihood_ig <- function(params, data, n_particles) {
-  # Unpack parameters for BNS with IG-SV
+apf_log_likelihood_ts <- function(params, data, n_particles) {
+  # Unpack parameters for BNS with TS-SV (7 parameters)
   mu        <- params[1]
   rho       <- params[2]
   lambda    <- params[3]
-  a_ig      <- params[4] # 'a' parameter for marginal IG distribution
-  b_ig      <- params[5] # 'b' parameter for marginal IG distribution
-  sigma0_sq <- params[6]
+  kappa     <- params[4]
+  a         <- params[5]
+  b         <- params[6]
+  sigma0_sq <- params[7]
   
   n_obs <- length(data)
   log_likelihood <- 0
   dt <- 1 # Assuming daily data
   
-  # --- Initialization ---
+  # Initialization
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
   
-  # --- Main Loop (Filtering) ---
+  # Main Filtering Loop
   for (t in 1:n_obs) {
     # --- Stage 1: Auxiliary Step ---
     predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
@@ -121,23 +147,21 @@ apf_log_likelihood_ig <- function(params, data, n_particles) {
     # --- Stage 2: Propagation and Final Weighting ---
     propagated_particles <- particles_sigma_sq[ancestor_indices]
     
-    # --- MODIFICATION: Simulate the BDLP for IG-OU ---
-    # Component 1: IG-Lévy process z^(1)
-    z1_increments <- rinvGauss(n_particles, 
-                               nu = (a_ig / 2) * (lambda*dt), 
-                               lambda = (b_ig^2) * (a_ig / 2) * (lambda*dt))
+    # --- Simulate the BDLP for TS-OU ---
+    # Component 1: A TS(kappa, kappa*a, b) Lévy process, z^(1)
+    z1_increments <- rts(n_particles, dt=1, kappa = kappa, a = kappa * a * lambda * dt, b = b)
     
-    # Component 2: Compound Poisson process z^(2)
-    jump_intensity_z2 <- (a_ig * b_ig / 2) * (lambda*dt)
+    # Component 2: A compound Poisson process z^(2)
+    jump_intensity_z2 <- a * b * kappa * (lambda * dt)
     jumps_z2 <- rpois(n_particles, jump_intensity_z2)
     jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
       if (nj == 0) return(0)
-      sum((1 / b_ig^2) * (rnorm(nj)^2))
+      sum(rgamma(nj, shape = 1 - kappa, rate = b^(1/kappa) / 2))
     })
     
     bdlp_increments <- z1_increments + jump_sizes_z2
     
-    # Update variance process (IG-OU)
+    # Update variance process (TS-OU)
     new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda * dt) + bdlp_increments)
     
     # Calculate second-stage weights (importance correction)
@@ -145,13 +169,11 @@ apf_log_likelihood_ig <- function(params, data, n_particles) {
     new_sds <- sqrt(new_particles_sigma_sq)
     
     log_numerator_weights <- dnorm(data[t], mean = new_means, sd = new_sds, log = TRUE)
-    log_denominator_weights <- dnorm(data[t],
+    log_denominator_weights <- dnorm(data[t], 
                                      mean = predicted_means[ancestor_indices], 
-                                     sd = predicted_sds[ancestor_indices], 
-                                     log = TRUE)
+                                     sd = predicted_sds[ancestor_indices], log = TRUE)
     
     log_second_stage_weights <- log_numerator_weights - log_denominator_weights
-    
     max_log_weight2 <- max(log_second_stage_weights)
     second_stage_weights <- exp(log_second_stage_weights - max_log_weight2)
     
@@ -163,7 +185,7 @@ apf_log_likelihood_ig <- function(params, data, n_particles) {
     
     # Final resampling
     final_normalized_weights <- second_stage_weights / sum(second_stage_weights)
-    if(any(is.na(final_normalized_weights)) || sum(final_normalized_weights) == 0) { 
+    if(any(is.na(final_normalized_weights)) || sum(final_normalized_weights) == 0) {
       final_indices <- sample(1:n_particles, size = n_particles, replace = TRUE)
     } else {
       final_indices <- sample(1:n_particles, 
@@ -179,69 +201,75 @@ apf_log_likelihood_ig <- function(params, data, n_particles) {
 }
 
 # --- 3. Define and Run the Optimization ---
-mle_objective_function_apf_ig <- function(scaled_params, data, n_particles) {
-  params <- numeric(6)
+mle_objective_function_apf_ts <- function(scaled_params, data, n_particles) {
+  params <- numeric(7)
   params[1] <- scaled_params[1]
-  params[2] <- -exp(scaled_params[2])
-  params[3] <- exp(scaled_params[3])
-  params[4] <- exp(scaled_params[4]) # a_ig
-  params[5] <- exp(scaled_params[5]) # b_ig
-  params[6] <- exp(scaled_params[6])
+  params[2] <- scaled_params[2]
+  params[3] <- exp(scaled_params[3]) # lambda
+  params[4] <- scaled_params[4]      # kappa is in (0,1)
+  params[5] <- exp(scaled_params[5]) # a
+  params[6] <- exp(scaled_params[6]) # b
+  params[7] <- exp(scaled_params[7]) # sigma0_sq
   
-  neg_log_lik <- apf_log_likelihood_ig(params, data, n_particles)
+  neg_log_lik <- apf_log_likelihood_ts(params, data, n_particles)
   
-  cat("Testing Params (IG):", round(params, 6), " | -LogLik (APF):", round(neg_log_lik, 6), "\n")
+  cat("Testing Params (TS):", round(params, 4), " | -LogLik (APF):", round(neg_log_lik, 4), "\n")
   
   if (!is.finite(neg_log_lik)) return(1e9)
   return(neg_log_lik)
 }
 
-# Initial parameters (plausible guesses for IG-OU)
-initial_scaled_params_ig <- c(
+# Initial parameters (plausible guesses for TS-OU)
+initial_scaled_params_ts <- c(
   mu = mean(log_returns),
-  rho_trans = log(0.9), 
-  log_lambda = log(0.01),
-  log_a_ig = log(1e-7),
-  log_b_ig = log(0.05),
+  rho_trans = -0.7, 
+  log_lambda = log(0.05),
+  kappa = 0.7, # Bounded between 0 and 1
+  log_a = log(1.5),
+  log_b = log(10.0),
   log_sigma0_sq = log(var(log_returns))
 )
 
-n_particles <- 5000
+n_particles <- 100
 
-cat("\nStarting MLE optimization for BNS-IG via APF (this will be slow)...\n")
-mle_results_apf_ig <- optim(
-  par = initial_scaled_params_ig,
-  fn = mle_objective_function_apf_ig,
+cat("\nStarting MLE optimization for BNS-TS via APF (this will be very slow)...\n")
+# Using optim with bounds for kappa
+mle_results_apf_ts <- optim(
+  par = initial_scaled_params_ts,
+  fn = mle_objective_function_apf_ts,
   data = log_returns,
   n_particles = n_particles,
-  method = "Nelder-Mead",
+  method = "L-BFGS-B", # Use a method that supports bounds
+  lower = c(-Inf, -Inf, -Inf, 1e-6, -Inf, -Inf, -Inf),
+  upper = c(Inf, Inf, Inf, 1-1e-6, Inf, Inf, Inf),
   control = list(maxit = 200, trace = 1) 
 )
 
 # --- 4. Display Results ---
 cat("\n--- APF MLE Optimization Finished ---\n")
 print("Optimal Scaled Parameters Found:")
-print(mle_results_apf_ig$par)
+print(mle_results_apf_ts$par)
 
 # Transform parameters back to their original scale
-estimated_params_mle_apf_ig <- numeric(6)
-estimated_params_mle_apf_ig[1] <- mle_results_apf_ig$par[1]
-estimated_params_mle_apf_ig[2] <- -exp(mle_results_apf_ig$par[2])
-estimated_params_mle_apf_ig[3] <- exp(mle_results_apf_ig$par[3])
-estimated_params_mle_apf_ig[4] <- exp(mle_results_apf_ig$par[4])
-estimated_params_mle_apf_ig[5] <- exp(mle_results_apf_ig$par[5])
-estimated_params_mle_apf_ig[6] <- exp(mle_results_apf_ig$par[6])
-names(estimated_params_mle_apf_ig) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
+estimated_params_mle_apf_ts <- numeric(6)
+estimated_params_mle_apf_ts[1] <- mle_results_apf_ts$par[1]
+estimated_params_mle_apf_ts[2] <- mle_results_apf_ts$par[2]
+estimated_params_mle_apf_ts[3] <- exp(mle_results_apf_ts$par[3])
+estimated_params_mle_apf_ts[4] <- mle_results_apf_ts$par[4]
+estimated_params_mle_apf_ts[5] <- exp(mle_results_apf_ts$par[5])
+estimated_params_mle_apf_ts[6] <- exp(mle_results_apf_ts$par[6])
+estimated_params_mle_apf_ts[7] <- exp(mle_results_apf_ts$par[7])
+names(estimated_params_mle_apf_ts) <- c("mu", "rho", "lambda", "kappa", "a", "b", "sigma0_sq")
 
 print("Optimal Interpretable Parameters (MLE):")
-print(estimated_params_mle_apf_ig)
+print(estimated_params_mle_apf_ts)
 
-cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_apf_ig$value, "\n")
+cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_apf_ts$value, "\n")
 
 cat("\nSimulating final BNS model path with estimated parameters...\n")
 
-bns_returns <- simulate_bns_ig_sv(
-  params = estimated_params_mle_apf_ig,
+bns_returns <- simulate_bns_ts_sv(
+  params = estimated_params_mle_apf_ts,
   n_steps = length(log_returns),
   dt = 1
 )
@@ -353,7 +381,7 @@ print(acf_plot)
 
 ## Save plots
 ggsave(
-  filename = here("outputs", "BNS-IG(MLE-APF)&GH_fit.png"),
+  filename = here("outputs", "BNS-TS(MLE-APF)&GH_fit.png"),
   plot = density_plot_hist_style,
   width = 2000,
   height = 1200,
@@ -362,7 +390,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-IG(MLE-APF)&GH_QQplot.png"),
+  filename = here("outputs", "BNS-TS(MLE-APF)&GH_QQplot.png"),
   plot = QQplots,
   width = 2000,
   height = 1200,
@@ -371,7 +399,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-IG(MLE-APF)&GH_acf.png"),
+  filename = here("outputs", "BNS-TS(MLE-APF)&GH_acf.png"),
   plot = acf_plot,
   width = 2000,
   height = 1200,

@@ -8,7 +8,7 @@ library(moments)
 set.seed(7914)
 
 # --- Load and Prepare Data ---
-here::i_am("analysis/model_SP500_BNS(MLE-PF).R")
+here::i_am("analysis/model_SP500_BNS-IG(MLE-PF).R")
 data <- readr::read_csv(here("data", "SP500.csv"))
 price_vector <- data$Last_Price[18080:nrow(data)]
 log_returns <- diff(log(price_vector))
@@ -82,7 +82,7 @@ particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
 mle_objective_function_pf_ig <- function(scaled_params, data, n_particles) {
   params <- numeric(6)
   params[1] <- scaled_params[1]
-  params[2] <- scaled_params[2]
+  params[2] <- -exp(scaled_params[2])
   params[3] <- exp(scaled_params[3])
   params[4] <- exp(scaled_params[4])
   params[5] <- exp(scaled_params[5])
@@ -99,7 +99,7 @@ mle_objective_function_pf_ig <- function(scaled_params, data, n_particles) {
 # Initial parameters
 initial_scaled_params_ig <- c(
   mu = mean(log_returns),
-  rho_trans = -0.7, 
+  rho_trans = log(0.7), 
   log_lambda = log(0.05),
   log_a_ig = log(1e-5),
   log_b_ig = log(1.0),
@@ -126,7 +126,7 @@ print(mle_results_pf_ig$par)
 # Transform parameters back to their original scale
 estimated_params_mle_pf_ig <- numeric(6)
 estimated_params_mle_pf_ig[1] <- mle_results_pf_ig$par[1]
-estimated_params_mle_pf_ig[2] <- mle_results_pf_ig$par[2]
+estimated_params_mle_pf_ig[2] <- -exp(mle_results_pf_ig$par[2])
 estimated_params_mle_pf_ig[3] <- exp(mle_results_pf_ig$par[3])
 estimated_params_mle_pf_ig[4] <- exp(mle_results_pf_ig$par[4])
 estimated_params_mle_pf_ig[5] <- exp(mle_results_pf_ig$par[5])
