@@ -5,7 +5,7 @@ library(ghyp)
 set.seed(7914)
 
 # Identify project location
-here::i_am("analysis/model_SP500_BNS(MLE-APF).R")
+here::i_am("analysis/model_SP500_BNS-Gamma(MLE-APF).R")
 
 # --- Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
@@ -144,7 +144,7 @@ initial_scaled_params <- c(
   log_sigma0_sq = log(var(log_returns))
 )
 
-n_particles <- 1000
+n_particles <- 10000
 
 cat("\nStarting MLE optimization via Auxiliary Particle Filter (this will be very slow)...\n")
 mle_results_apf_gamma <- optim(
@@ -291,7 +291,7 @@ print(acf_plot)
 
 ## Save plots
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-APF)&GH_fit.png"),
+  filename = here("outputs", "BNS-gamma(MLE-APF-10000p)&GH_fit.png"),
   plot = density_plot_hist_style,
   width = 2000,
   height = 1200,
@@ -300,7 +300,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-APF)&GH_QQplot.png"),
+  filename = here("outputs", "BNS-gamma(MLE-APF-10000p)&GH_QQplot.png"),
   plot = QQplots,
   width = 3000,
   height = 1500,
@@ -309,7 +309,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-APF)&GH_acf.png"),
+  filename = here("outputs", "BNS-gamma(MLE-APF-10000p)&GH_acf.png"),
   plot = acf_plot,
   width = 2000,
   height = 1200,

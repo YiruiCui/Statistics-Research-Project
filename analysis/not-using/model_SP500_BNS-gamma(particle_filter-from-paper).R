@@ -11,7 +11,7 @@ library(gridExtra)
 set.seed(7914)
 
 # Identify project location
-here::i_am("analysis/model_SP500_BNS(MLE-APF).R")
+here::i_am("analysis/model_SP500_BNS-gamma(particle_filter-from-paper).R")
 
 # --- Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
