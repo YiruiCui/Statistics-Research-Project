@@ -16,161 +16,85 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
-# --- BNS Simulation Function with IG Stochastic Volatility ---
-simulate_bns_ig_sv <- function(params, n_steps, dt) {
-  # Unpack parameters for the BNS model.
-  # Note: For an IG-OU marginal, the volatility process is typically
-  # parameterized by (a, b) for the IG distribution and lambda for mean reversion.
-  mu        <- params[1]
-  rho       <- params[2]
-  lambda    <- params[3] # Mean-reversion speed for volatility
-  a_ig      <- params[4] # 'a' parameter of the marginal IG(a,b) distribution
-  b_ig      <- params[5] # 'b' parameter of the marginal IG(a,b) distribution
-  sigma0_sq <- params[6] # Initial variance
-  
-  # Initialize vectors for the simulation path
-  log_S <- numeric(n_steps + 1)
-  sigma_sq <- numeric(n_steps + 1)
-  
-  # Set initial values
-  log_S[1] <- 0
-  sigma_sq[1] <- sigma0_sq
-  
-  # --- Simulate the Background Driving Lévy Process (BDLP) for IG-OU ---
-  # According to Schoutens (2003), Section 5.5.2, the BDLP z is the sum
-  # of two independent Lévy processes: z = z^(1) + z^(2).
-  
-  # Component 1: An IG-Lévy process z^(1) with parameters a/2 and b.
-  # We simulate its increments for each time step.
-  z1_increments <- rinvGauss(n_steps, nu = (a_ig / 2) * dt, lambda = (b_ig^2) * (a_ig / 2) * dt)
-  
-  # Component 2: A compound Poisson process z^(2).
-  # The jump intensity is (a*b)/2.
-  jump_intensity_z2 <- (a_ig * b_ig / 2) * dt
-  jumps_z2 <- rpois(n_steps, jump_intensity_z2)
-  
-  # The jump sizes are b_ig^-2 * v_n^2, where v_n are standard normal.
-  jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
-    if (nj == 0) return(0)
-    sum((1 / b_ig^2) * (rnorm(nj)^2))
-  })
-  
-  # The total increment of the BDLP at each step
-  bdlp_increments <- z1_increments + jump_sizes_z2
-  
-  # Generate standard normal random variables for the main Brownian motion
-  dW <- rnorm(n_steps, mean = 0, sd = sqrt(dt))
-  
-  # --- Euler-Maruyama Discretization for the BNS System ---
-  for (t in 1:n_steps) {
-    sigma_sq_prev <- max(1e-9, sigma_sq[t]) # Ensure variance is non-negative
-    
-    # Update variance process (IG-OU)
-    # d(sigma_t^2) = -lambda * sigma_t^2 * dt + d(z_{lambda*t})
-    # The increment d(z_{lambda*t}) is what we simulated above.
-    d_sigma_sq <- -lambda * sigma_sq_prev * dt + bdlp_increments[t]
-    sigma_sq[t+1] <- sigma_sq_prev + d_sigma_sq
-    
-    # Update log-return process (BNS)
-    # d(log S_t) = (mu - 0.5*sigma_t^2)dt + sigma_t*dW_t + rho*d(z_{lambda*t})
-    d_log_S <- (mu - 0.5 * sigma_sq_prev) * dt + 
-      sqrt(sigma_sq_prev) * dW[t] + 
-      rho * bdlp_increments[t]
-    
-    log_S[t+1] <- log_S[t] + d_log_S
-  }
-  
-  # Return the simulated log-returns
-  return(diff(log_S))
-}
-
 # --- 2. Auxiliary Particle Filter for BNS with IG-SV ---
-
 apf_log_likelihood_ig <- function(params, data, n_particles) {
-  # Unpack parameters for BNS with IG-SV
+  # Unpack parameters
   mu        <- params[1]
   rho       <- params[2]
   lambda    <- params[3]
-  a_ig      <- params[4] # 'a' parameter for marginal IG distribution
-  b_ig      <- params[5] # 'b' parameter for marginal IG distribution
+  a_ig      <- params[4]
+  b_ig      <- params[5]
   sigma0_sq <- params[6]
   
   n_obs <- length(data)
   log_likelihood <- 0
-  dt <- 1 # Assuming daily data
+  dt <- 1
   
-  # --- Initialization ---
+  # Initialization
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
   
-  # --- Main Loop (Filtering) ---
+  # Main Filtering Loop
   for (t in 1:n_obs) {
-    # --- Stage 1: Auxiliary Step ---
-    predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
-    predicted_means <- mu - 0.5 * predicted_sigma_sq
-    predicted_sds <- sqrt(predicted_sigma_sq)
+    # --- Stage 1: Auxiliary Step (Look-Ahead) ---
     
+    # 1a. Make a simplified prediction of the state at time t, based on particles at t-1.
+    # This prediction ignores the random jumps to create a tractable "first-guess".
+    predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
+    # Note: The mean of the return also ignores the jump term for this first stage.
+    predicted_means <- (mu - 0.5 * predicted_sigma_sq) * dt
+    predicted_sds <- sqrt(predicted_sigma_sq * dt)
+    
+    # 1b. Calculate first-stage weights using the CURRENT observation data[t].
     log_first_stage_weights <- dnorm(data[t], mean = predicted_means, sd = predicted_sds, log = TRUE)
-    max_log_weight <- max(log_first_stage_weights)
+    
+    # Normalize
+    max_log_weight <- max(log_first_stage_weights, na.rm = TRUE)
+    if (!is.finite(max_log_weight)) return(1e9)
     first_stage_weights <- exp(log_first_stage_weights - max_log_weight)
     
-    ancestor_indices <- sample(1:n_particles, 
-                               size = n_particles, 
-                               replace = TRUE, 
-                               prob = first_stage_weights)
+    # 1c. Resample ancestor indices from t-1 based on these "look-ahead" weights.
+    if (sum(first_stage_weights) == 0 || !is.finite(sum(first_stage_weights))) return(1e9)
+    ancestor_indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = first_stage_weights)
     
-    # --- Stage 2: Propagation and Final Weighting ---
+    # --- Stage 2: Propagation and Correction ---
+    
+    # 2a. Propagate ONLY the chosen ancestors using the FULL model dynamics.
     propagated_particles <- particles_sigma_sq[ancestor_indices]
     
-    # --- MODIFICATION: Simulate the BDLP for IG-OU ---
-    # Component 1: IG-Lévy process z^(1)
-    z1_increments <- rinvGauss(n_particles, 
-                               nu = (a_ig / 2) * (lambda*dt), 
-                               lambda = (b_ig^2) * (a_ig / 2) * (lambda*dt))
+    # Simulate the BDLP increment for the chosen particles.
+    bdlp_increments <- simulate_ig_ou_bdlp_increment(n_particles, lambda * dt, a_ig, b_ig)
     
-    # Component 2: Compound Poisson process z^(2)
-    jump_intensity_z2 <- (a_ig * b_ig / 2) * (lambda*dt)
-    jumps_z2 <- rpois(n_particles, jump_intensity_z2)
-    jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
-      if (nj == 0) return(0)
-      sum((1 / b_ig^2) * (rnorm(nj)^2))
-    })
-    
-    bdlp_increments <- z1_increments + jump_sizes_z2
-    
-    # Update variance process (IG-OU)
     new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda * dt) + bdlp_increments)
     
-    # Calculate second-stage weights (importance correction)
-    new_means <- mu - 0.5 * new_particles_sigma_sq
-    new_sds <- sqrt(new_particles_sigma_sq)
-    
+    # 2b. Calculate second-stage (correction) weights.
+    # CRITICAL FIX: The mean now includes the jump term rho * dz.
+    new_means <- (mu - 0.5 * new_particles_sigma_sq) * dt + rho * bdlp_increments
+    new_sds <- sqrt(new_particles_sigma_sq * dt)
     log_numerator_weights <- dnorm(data[t], mean = new_means, sd = new_sds, log = TRUE)
-    log_denominator_weights <- dnorm(data[t],
+    
+    # Denominator is the likelihood from the simplified prediction for the CHOSEN ancestor.
+    log_denominator_weights <- dnorm(data[t], 
                                      mean = predicted_means[ancestor_indices], 
                                      sd = predicted_sds[ancestor_indices], 
                                      log = TRUE)
     
     log_second_stage_weights <- log_numerator_weights - log_denominator_weights
     
-    max_log_weight2 <- max(log_second_stage_weights)
+    # Normalize
+    max_log_weight2 <- max(log_second_stage_weights, na.rm = TRUE)
+    if (!is.finite(max_log_weight2)) return(1e9)
     second_stage_weights <- exp(log_second_stage_weights - max_log_weight2)
     
-    # Update total log-likelihood
+    # 2c. Update total log-likelihood.
+    if (mean(second_stage_weights) == 0 || !is.finite(mean(second_stage_weights))) return(1e9)
     log_likelihood <- log_likelihood + 
       log(mean(first_stage_weights)) + 
       max_log_weight + max_log_weight2 + 
       log(mean(second_stage_weights))
     
-    # Final resampling
+    # 2d. Final resampling for the next iteration.
     final_normalized_weights <- second_stage_weights / sum(second_stage_weights)
-    if(any(is.na(final_normalized_weights)) || sum(final_normalized_weights) == 0) { 
-      final_indices <- sample(1:n_particles, size = n_particles, replace = TRUE)
-    } else {
-      final_indices <- sample(1:n_particles, 
-                              size = n_particles, 
-                              replace = TRUE, 
-                              prob = final_normalized_weights)
-    }
+    final_indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = final_normalized_weights)
     
     particles_sigma_sq <- new_particles_sigma_sq[final_indices]
   }
@@ -201,12 +125,12 @@ initial_scaled_params_ig <- c(
   mu = mean(log_returns),
   rho_trans = log(0.9), 
   log_lambda = log(0.01),
-  log_a_ig = log(1e-7),
+  log_a_ig = log(1.0),
   log_b_ig = log(0.05),
   log_sigma0_sq = log(var(log_returns))
 )
 
-n_particles <- 5000
+n_particles <- 1000
 
 cat("\nStarting MLE optimization for BNS-IG via APF (this will be slow)...\n")
 mle_results_apf_ig <- optim(

@@ -28,34 +28,31 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
   
   n_obs <- length(data)
   log_likelihood <- 0
+  dt <- 1 # Daily data
   
   # --- Initialization ---
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
   
-  # --- Main Loop (Filtering) ---
+  # --- Main Filtering Loop ---
   for (t in 1:n_obs) {
-    # --- Stage 1: Auxiliary Step ---
+    # --- Stage 1: Auxiliary Step (The "Look-Ahead") ---
     
-    # 1a. Predict the auxiliary variable: E[sigma_t^2 | sigma_{t-1}^2]
-    # For the Gamma-OU process, this is the mean-reverting part.
-    # We ignore the jump part here as it's an approximation.
-    predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda))
+    # 1a. Make a SIMPLIFIED prediction of the mean state at time t, based on particles at t-1.
+    # This is often just the mean of the transition, ignoring the random jumps for now.
+    predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
+    predicted_means <- (mu - 0.5 * predicted_sigma_sq) * dt # Mean of the Gaussian part, ignoring jumps
+    predicted_sds <- sqrt(predicted_sigma_sq * dt)
     
-    # 1b. Calculate first-stage weights based on the observation at time t.
-    # These weights tell us which of the current particles are most likely
-    # to produce a good prediction for the next step.
-    predicted_means <- mu - 0.5 * predicted_sigma_sq
-    predicted_sds <- sqrt(predicted_sigma_sq)
-    
+    # 1b. Calculate first-stage weights using the CURRENT observation data[t].
+    # These weights determine which particles at t-1 are good "ancestors".
     log_first_stage_weights <- dnorm(data[t], mean = predicted_means, sd = predicted_sds, log = TRUE)
     
-    # Normalize weights to avoid numerical issues
+    # Normalize weights
     max_log_weight <- max(log_first_stage_weights)
     first_stage_weights <- exp(log_first_stage_weights - max_log_weight)
     
-    # 1c. First-stage resampling.
-    # We sample the *indices* of the particles that will be propagated.
-    # This focuses our computational effort on promising particles.
+    # 1c. Resample the ANCESTOR indices from t-1 based on the first-stage weights.
+    if (sum(first_stage_weights) == 0 || !is.finite(sum(first_stage_weights))) return(1e9)
     ancestor_indices <- sample(1:n_particles, 
                                size = n_particles, 
                                replace = TRUE, 
@@ -63,27 +60,26 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
     
     # --- Stage 2: Propagation and Final Weighting ---
     
-    # 2a. Propagate the chosen ancestor particles forward one step.
+    # 2a. Propagate ONLY the chosen ancestor particles forward using the FULL model dynamics.
     propagated_particles <- particles_sigma_sq[ancestor_indices]
     
-    jump_intensity <- a * lambda * 1 # dt = 1
-    jumps <- rpois(n_particles, jump_intensity)
-    jump_sizes <- sapply(jumps, function(nj) {
+    # Simulate the BDLP increment for the chosen particles.
+    num_jumps <- rpois(n_particles, lambda * a * dt)
+    bdlp_increments <- sapply(num_jumps, function(nj) {
       if (nj == 0) return(0)
       sum(rgamma(nj, shape = 1, rate = b))
     })
     
-    # This is our new set of particles for time t
-    new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda) + jump_sizes)
+    # This is our new cloud of particles at time t.
+    new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda * dt) + bdlp_increments)
     
-    # 2b. Calculate second-stage weights (importance correction).
-    # These weights correct for the approximation made in Stage 1.
-    new_means <- mu - 0.5 * new_particles_sigma_sq
-    new_sds <- sqrt(new_particles_sigma_sq)
-    
+    # 2b. Calculate second-stage (correction) weights.
+    # Numerator: The likelihood of data[t] given the fully propagated particle.
+    new_means <- (mu - 0.5 * new_particles_sigma_sq) * dt + rho * bdlp_increments
+    new_sds <- sqrt(new_particles_sigma_sq * dt)
     log_numerator_weights <- dnorm(data[t], mean = new_means, sd = new_sds, log = TRUE)
     
-    # The denominator is the weight from the particle we chose in the first stage
+    # Denominator: The likelihood from the simplified prediction for the CHOSEN ancestor.
     log_denominator_weights <- dnorm(data[t], 
                                      mean = predicted_means[ancestor_indices], 
                                      sd = predicted_sds[ancestor_indices], 
@@ -96,24 +92,23 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
     second_stage_weights <- exp(log_second_stage_weights - max_log_weight2)
     
     # 2c. Update the total log-likelihood.
-    # This combines the likelihood from both stages.
+    if (sum(second_stage_weights) == 0 || !is.finite(sum(second_stage_weights))) return(1e9)
     log_likelihood <- log_likelihood + 
       log(mean(first_stage_weights)) + 
       max_log_weight + max_log_weight2 + 
       log(mean(second_stage_weights))
     
-    # 2d. Final resampling.
+    # 2d. Final resampling for the next iteration.
     final_normalized_weights <- second_stage_weights / sum(second_stage_weights)
     final_indices <- sample(1:n_particles, 
                             size = n_particles, 
                             replace = TRUE, 
                             prob = final_normalized_weights)
     
-    # Update the particle cloud for the next iteration
     particles_sigma_sq <- new_particles_sigma_sq[final_indices]
   }
   
-  return(-log_likelihood) # Return negative log-likelihood for minimization
+  return(-log_likelihood)
 }
 
 # --- 3. Define and Run the Optimization ---

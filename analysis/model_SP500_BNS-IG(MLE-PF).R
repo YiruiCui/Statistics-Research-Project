@@ -13,9 +13,88 @@ data <- readr::read_csv(here("data", "SP500.csv"))
 price_vector <- data$Last_Price[18080:nrow(data)]
 log_returns <- diff(log(price_vector))
 
-# --- Fit GH model for comparison plots ---
-gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE, silent = TRUE)
+# --- Helper Function to Simulate the IG-OU BDLP Increment ---
+# Implements the decomposition z = z^(1) + z^(2) from Schoutens (2003), Section 5.5.2.
+# Note: The 'dt' here corresponds to the time-scaled dt (i.e., lambda * dt).
+simulate_ig_ou_bdlp_increment <- function(n, dt, a_ig, b_ig) {
+  
+  # --- Component 1: An IG-Lévy process z^(1) ---
+  # According to Schoutens, the increment's distribution is IG(A, B) where
+  # A = (a_ig / 2) * dt and B = b_ig .
+  A <- (a_ig / 2) * dt
+  B <- b_ig
+  
+  # CONVERSION to the (nu, lambda) parameterization for rinvGauss
+  # nu (mean) = A / B
+  # lambda (shape) = A^2
+  nu_param <- A / B
+  lambda_param <- A^2
+  
+  z1_increments <- SuppDists::rinvGauss(
+    n, 
+    nu = nu_param, 
+    lambda = lambda_param
+  )
+  
+  # --- Component 2: A compound Poisson process z^(2) ---
+  # Jump intensity is (a*b)/2[cite: 2096].
+  jump_intensity_z2 <- 1/(a_ig * b_ig / 2) * dt
+  num_jumps_z2 <- rpois(n, jump_intensity_z2)
+  
+  # Jump sizes are b_ig^-2 * v_n^2, where v_n are standard normal[cite: 2095].
+  jump_sizes_z2 <- sapply(num_jumps_z2, function(nj) {
+    if (nj == 0) return(0)
+    sum((1 / b_ig^2) * (rnorm(nj)^2))
+  })
+  
+  return(z1_increments + jump_sizes_z2)
+}
 
+# --- BNS Simulation Function with IG Stochastic Volatility ---
+simulate_bns_ig_sv <- function(params, n_steps, dt) {
+  # Unpack parameters
+  mu        <- params[1]
+  rho       <- params[2]
+  lambda    <- params[3] # Mean-reversion speed for volatility
+  a_ig      <- params[4] # 'a' parameter of the marginal IG(a,b) distribution
+  b_ig      <- params[5] # 'b' parameter of the marginal IG(a,b) distribution
+  sigma0_sq <- params[6] # Initial variance
+  
+  # Initialize vectors for the simulation path
+  log_S <- numeric(n_steps + 1)
+  sigma_sq <- numeric(n_steps + 1)
+  log_S[1] <- 0
+  sigma_sq[1] <- sigma0_sq
+  
+  # --- Simulate all Background Driving Lévy Process (BDLP) increments ---
+  bdlp_increments <- simulate_ig_ou_bdlp_increment(
+    n = n_steps, 
+    dt = lambda * dt, 
+    a_ig = a_ig, 
+    b_ig = b_ig
+  )
+  
+  # Generate standard normal random variables for the main Brownian motion
+  dW <- rnorm(n_steps, mean = 0, sd = sqrt(dt))
+  
+  # --- Euler-Maruyama Discretization for the BNS System ---
+  for (t in 1:n_steps) {
+    sigma_sq_prev <- max(1e-9, sigma_sq[t])
+    
+    # Update variance process (IG-OU)
+    # d(sigma_t^2) = -lambda * sigma_t^2 * dt + d(z_{lambda*t})
+    sigma_sq[t+1] <- sigma_sq[t] - lambda * sigma_sq_prev * dt + bdlp_increments[t]
+    
+    # Update log-return process (BNS)
+    # d(log S_t) = (mu - 0.5*sigma_t^2)dt + sigma_t*dW_t + rho*d(z_{lambda*t})
+    log_S[t+1] <- log_S[t] + (mu - 0.5 * sigma_sq_prev) * dt + 
+      sqrt(sigma_sq_prev) * dW[t] + 
+      rho * bdlp_increments[t]
+  }
+  
+  # Return the simulated log-returns
+  return(diff(log_S))
+}
 
 # --- 2. Standard Particle Filter (SIR) Log-Likelihood Function ---
 particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
@@ -37,24 +116,21 @@ particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
   # Main Filtering Loop
   for (t in 1:n_obs) {
     # --- Step 1: Prediction/Propagation (Propose) ---
-    # Move all particles forward one step using the state equation (IG-OU process).
+    # Simulate the BDLP increment for each particle over a time step of lambda * dt
+    bdlp_increments <- simulate_ig_ou_bdlp_increment(
+      n = n_particles, 
+      dt = lambda * dt, 
+      a_ig = a_ig, 
+      b_ig = b_ig
+    )
     
-    # Simulate the BDLP for IG-OU
-    z1_increments <- rinvGauss(n_particles, nu = (a_ig / 2) * (lambda*dt), lambda = (b_ig^2) * (a_ig / 2) * (lambda*dt))
-    jump_intensity_z2 <- (a_ig * b_ig / 2) * (lambda*dt)
-    jumps_z2 <- rpois(n_particles, jump_intensity_z2)
-    jump_sizes_z2 <- sapply(jumps_z2, function(nj) {
-      if (nj == 0) return(0)
-      sum((1 / b_ig^2) * (rnorm(nj)^2))
-    })
-    bdlp_increments <- z1_increments + jump_sizes_z2
-    
+    # Move all particles forward one step using the state equation (IG-OU process)
     particles_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt) + bdlp_increments)
     
-    # --- Step 2: Weighting (Correct) ---
-    # Calculate the likelihood (weight) of the observation data[t] for each new particle position.
-    particle_means <- mu - 0.5 * particles_sigma_sq
-    particle_sds <- sqrt(particles_sigma_sq)
+    # --- Step 2: Weighting ---
+    
+    particle_means <- (mu - 0.5 * particles_sigma_sq) * dt + rho * bdlp_increments
+    particle_sds <- sqrt(particles_sigma_sq * dt)
     
     log_weights <- dnorm(data[t], mean = particle_means, sd = particle_sds, log = TRUE)
     
@@ -63,15 +139,12 @@ particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
     weights <- exp(log_weights - max_log_weight)
     
     # --- Step 3: Update Log-Likelihood ---
+    if (sum(weights) == 0 || !is.finite(sum(weights))) return(1e9) # Add safety check
     log_likelihood <- log_likelihood + max_log_weight + log(mean(weights))
     
     # --- Step 4: Resampling ---
     normalized_weights <- weights / sum(weights)
-    if(any(is.na(normalized_weights)) || sum(normalized_weights) == 0) {
-      indices <- sample(1:n_particles, size = n_particles, replace = TRUE)
-    } else {
-      indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = normalized_weights)
-    }
+    indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = normalized_weights)
     particles_sigma_sq <- particles_sigma_sq[indices]
   }
   
@@ -99,14 +172,14 @@ mle_objective_function_pf_ig <- function(scaled_params, data, n_particles) {
 # Initial parameters
 initial_scaled_params_ig <- c(
   mu = mean(log_returns),
-  rho_trans = log(0.7), 
-  log_lambda = log(0.05),
-  log_a_ig = log(1e-5),
-  log_b_ig = log(1.0),
+  rho_trans = log(1.0), 
+  log_lambda = log(0.1),
+  log_a_ig = log(0.1),
+  log_b_ig = log(100.0),
   log_sigma0_sq = log(var(log_returns))
 )
 
-n_particles <- 1000
+n_particles <- 10000
 
 cat("\nStarting MLE optimization for BNS-IG via Standard Particle Filter...\n")
 mle_results_pf_ig <- optim(
@@ -115,7 +188,7 @@ mle_results_pf_ig <- optim(
   data = log_returns,
   n_particles = n_particles,
   method = "Nelder-Mead",
-  control = list(maxit = 200, trace = 1) 
+  control = list(maxit = 300, trace = 1) 
 )
 
 # --- 4. Display Results ---
@@ -253,7 +326,7 @@ print(acf_plot)
 
 ## Save plots
 ggsave(
-  filename = here("outputs", "BNS-IG(MLE-PF)&GH_fit.png"),
+  filename = here("outputs", "BNS-IG(MLE-PF-10000p)&GH_fit.png"),
   plot = density_plot_hist_style,
   width = 2000,
   height = 1200,
@@ -262,7 +335,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-IG(MLE-PF)&GH_QQplot.png"),
+  filename = here("outputs", "BNS-IG(MLE-PF-10000p)&GH_QQplot.png"),
   plot = QQplots,
   width = 2000,
   height = 1200,
@@ -271,7 +344,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-IG(MLE-PF)&GH_acf.png"),
+  filename = here("outputs", "BNS-IG(MLE-PF-10000p)&GH_acf.png"),
   plot = acf_plot,
   width = 2000,
   height = 1200,

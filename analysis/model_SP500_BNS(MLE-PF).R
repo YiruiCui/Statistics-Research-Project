@@ -91,7 +91,6 @@ particle_filter_log_likelihood <- function(params, data, n_particles) {
     
     # --- Step 2: Weighting ---
     
-    # CORRECTLY CALCULATE THE WEIGHTS
     # The weight is the probability of the observed return data[t], conditional
     # on the particle's variance AND the simulated jump (bdlp_increments).
     # We use the observation equation:
