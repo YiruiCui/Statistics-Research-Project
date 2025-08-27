@@ -20,8 +20,7 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
-# --- 2. Helper Functions (Corrected and Finalized) ---
-
+# --- 2. Helper Functions ---
 simulate_gamma_ou_innovation <- function(nu, alpha, lambda, t, K = 1) {
   poisson_rate <- nu * lambda * t
   if (poisson_rate <= 0) {

@@ -158,7 +158,7 @@ initial_scaled_params <- c(
   rho_trans = log(1.0), 
   log_lambda = log(0.05),
   log_a = log(1.0),
-  log_b = log(8000),
+  log_b = log(100),
   log_sigma0_sq = log(var(log_returns))
 )
 
@@ -181,27 +181,29 @@ mle_results <- optim(
 # --- 5. Display Results ---
 cat("\n--- MLE Optimization Finished ---\n")
 print("Optimal Scaled Parameters Found:")
-print(mle_results$par)
+print(mle_results_pf_gamma$par)
 
 # Transform parameters back to their original scale
-estimated_params_mle <- numeric(6)
-estimated_params_mle[1] <- mle_results$par[1]
-estimated_params_mle[2] <- -exp(mle_results$par[2])
-estimated_params_mle[3] <- exp(mle_results$par[3])
-estimated_params_mle[4] <- exp(mle_results$par[4])
-estimated_params_mle[5] <- exp(mle_results$par[5])
-estimated_params_mle[6] <- exp(mle_results$par[6])
-names(estimated_params_mle) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
+estimated_params_mle_pf_gamma <- numeric(6)
+estimated_params_mle_pf_gamma[1] <- mle_results_pf_gamma$par[1]
+estimated_params_mle_pf_gamma[2] <- -exp(mle_results_pf_gamma$par[2])
+estimated_params_mle_pf_gamma[3] <- exp(mle_results_pf_gamma$par[3])
+estimated_params_mle_pf_gamma[4] <- exp(mle_results_pf_gamma$par[4])
+estimated_params_mle_pf_gamma[5] <- exp(mle_results_pf_gamma$par[5])
+estimated_params_mle_pf_gamma[6] <- exp(mle_results_pf_gamma$par[6])
+names(estimated_params_mle_pf_gamma) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
 
 print("Optimal Interpretable Parameters (MLE):")
-print(estimated_params_mle)
+print(estimated_params_mle_pf_gamma)
 
-cat("\nFinal Minimized Negative Log-Likelihood:", mle_results$value, "\n")
+cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_pf_gamma$value, "\n")
 
 cat("\nSimulating final BNS model path with estimated parameters...\n")
 
+set.seed(7914)
+
 bns_returns <- simulate_bns_gamma_sv(
-  params = estimated_params_mle,
+  params = estimated_params_mle_pf_gamma,
   n_steps = length(log_returns),
   dt = 1
 )
@@ -223,20 +225,20 @@ density_plot_hist_style <- ggplot(data.frame(value = log_returns), aes(x = value
                  color = "white") +
   # BNS simulated density as a line
   geom_density(data = data.frame(value = bns_returns), 
-               aes(color = "BNS (Simulated)"), linewidth = 1.2) +
+               aes(color = "BNS (Gamma)"), linewidth = 1.2) +
   # GH fitted density as a line
   geom_line(data = gh_density_data, 
-            aes(x = x, y = y, color = "GH (Fitted)"), 
+            aes(x = x, y = y, color = "GH"), 
             linewidth = 1.2) +
   # Labels and Titles
   labs(
-    title = "Static Comparison: Unconditional Return Distributions", 
+    title = "Unconditional Return Distributions", 
     x = "Log Return", 
     y = "Density"
   ) +
   # Colors and Theme
   scale_fill_manual(values = c("S&P 500 Empirical" = "lightblue")) +
-  scale_color_manual(values = c("BNS (Simulated)" = "blue", "GH (Fitted)" = "red")) +
+  scale_color_manual(values = c("BNS (Gamma)" = "blue", "GH" = "red")) +
   theme_minimal(base_size = 14) +
   coord_cartesian(xlim = quantile(log_returns, c(0.005, 0.995))) +
   guides(fill = guide_legend(title = NULL), color = guide_legend(title = "Model Overlays"))
@@ -267,7 +269,7 @@ qq_plot_bns <- ggplot(qq_data, aes(x = bns, y = empirical)) +
   geom_point(alpha = 0.5, color = "blue") +
   geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
   labs(
-    title = "Q-Q Plot: Empirical vs. Simulated BNS", 
+    title = "Q-Q Plot: Empirical vs. Fitted BNS (Gamma)", 
     x = "Theoretical Quantiles (BNS)", 
     y = "Empirical Quantiles (S&P 500)"
   ) +
@@ -287,7 +289,7 @@ acf_gh <- acf(abs(gh_samples), plot = FALSE, lag.max = 50)
 acf_data <- data.frame(
   Lag = acf_empirical$lag,
   ACF = c(acf_empirical$acf, acf_bns$acf, acf_gh$acf),
-  Model = factor(rep(c("S&P 500 Empirical", "BNS (Simulated)", "GH (Static)"), 
+  Model = factor(rep(c("S&P 500 Empirical", "BNS (Gamma)", "GH"), 
                      each = length(acf_empirical$lag)))
 )
 
@@ -298,22 +300,22 @@ acf_plot <- ggplot(acf_data, aes(x = Lag, y = ACF, fill = Model)) +
   geom_bar(stat = "identity", position = "dodge") +
   geom_hline(yintercept = c(ci, -ci), linetype = "dashed", color = "black") +
   labs(
-    title = "Dynamic Comparison: Autocorrelation of Absolute Returns", 
+    title = "Autocorrelation of Absolute Returns", 
     subtitle = "Demonstrating Volatility Clustering", 
     x = "Lag (Days)", 
     y = "Autocorrelation"
   ) +
   theme_minimal(base_size = 14) +
   scale_fill_manual(values = c("S&P 500 Empirical" = "black", 
-                               "BNS (Simulated)" = "blue", 
-                               "GH (Static)" = "red")) +
+                               "BNS (Gamma)" = "blue", 
+                               "GH" = "red")) +
   theme(legend.position = "bottom")
 
 print(acf_plot)
 
 ## Save plots
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-PF)&GH_fit.png"),
+  filename = here("outputs", "BNS-gamma(MLE-PF-10000p)&GH_fit.png"),
   plot = density_plot_hist_style,
   width = 2000,
   height = 1200,
@@ -322,7 +324,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-PF)&GH_QQplot.png"),
+  filename = here("outputs", "BNS-gamma(MLE-PF-10000p)&GH_QQplot.png"),
   plot = QQplots,
   width = 3000,
   height = 1500,
@@ -331,7 +333,7 @@ ggsave(
 )
 
 ggsave(
-  filename = here("outputs", "BNS-gamma(MLE-PF)&GH_acf.png"),
+  filename = here("outputs", "BNS-gamma(MLE-PF-10000p)&GH_acf.png"),
   plot = acf_plot,
   width = 2000,
   height = 1200,

@@ -1,6 +1,8 @@
+# This file contain the function that compute critical values for AD test
+
 ad_test_monte_carlo <- function(sample,
-                                cdf_fun,    # function(x) → CDF
-                                rgen_fun,   # function(n) → samples
+                                cdf_fun,    # function(x)  CDF
+                                rgen_fun,   # function(n)  samples
                                 B = 1000,   # Monte Carlo sample count
                                 n = 100,
                                 plot = TRUE,

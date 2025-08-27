@@ -1,7 +1,27 @@
-library(goftest)
+# ----------------------------------------------
+# Apply Cramér–von Mises and AD test to all fitted model
+# ----------------------------------------------
+# Note: This script requires the parameters of all fitted model. 
+# Ensure all modelling scripts have been run first:
+#library(here)
+#here::i_am("analysis/CvM&AD_test.R")
+#source(here("analysis","model_S&P_500_Meixner.R"))
+#source(here("analysis","model_S&P_500_GH.R"))
+#source(here("analysis","model_S&P_500_Kou_DEJE.R"))
+#source(here("analysis","model_S&P_500_CGMY(COS_method).R"))
+#source(here("analysis","model_S&P_500_alpha-stable(COS_method).R"))
 
-# Fixed-parameter Meixner CDF
-meixner_cdf_fixed <- function(x) meixner_cdf_m(x, m = m, a = alpha, b = beta, d = delta)
+# --- Import required package and function ---
+library(goftest)
+source(here("src","AD_test.R"))
+
+# Meixner CDF with fitted parameters
+meixner_cdf_fitted <- function(x) meixner_cdf_m(x, 
+                                                m = m_Meixner, 
+                                                a = alpha_Meixner, 
+                                                b = beta_Meixner, 
+                                                d = delta_Meixner
+                                                )
 
 # Meixner RNG via inverse CDF (quantile function)
 meixner_rgen <- function(n) {
@@ -10,13 +30,16 @@ meixner_rgen <- function(n) {
 }
 
 # Apply Cramér–von Mises test to Meixner
-cvm.test(log_returns, "meixner_cdf_m", m=m, a=alpha, b=beta, d=delta, estimated=TRUE)
+set.seed(7914) # For reproducibility
+cvm.test(log_returns, "meixner_cdf_m", 
+         m=m_Meixner, a=alpha_Meixner, b=beta_Meixner, d=delta_Meixner, 
+         estimated=TRUE
+         )
 
 # Apply Anderson–Darling test to Meixner
-# Run AD test for Meixner
 result_meixner <- ad_test_monte_carlo(
   sample   = log_returns,
-  cdf_fun  = meixner_cdf_fixed,
+  cdf_fun  = meixner_cdf_fitted,
   rgen_fun = meixner_rgen,
   B        = 1000,
   seed     = 7914
@@ -29,11 +52,12 @@ cat("Critical values (90%, 95%, 99%):\n")
 print(result_meixner$critical_values)
 
 
-# Define CDF and RNG from fitted GH model
+# Define CDF and RNG for fitted GH model
 gh_cdf <- function(x) pghyp(x, object = gh_fit)
 gh_rgen <- function(n) rghyp(n, object = gh_fit)
 
 # Apply Cramér–von Mises test to GH
+set.seed(7914) # For reproducibility
 cvm.test(log_returns, null = gh_cdf, estimated = TRUE)
 
 # Apply Anderson–Darling test to GH
@@ -45,12 +69,22 @@ result_gh <- ad_test_monte_carlo(
   seed = 7914
 )
 
-# View output
-result_gh$p_value
-result_gh$critical_values
+# Print results
+cat("Anderson–Darling statistic (GH):", result_gh$ad_statistic, "\n")
+cat("p-value:", result_gh$p_value, "\n")
+cat("Critical values (90%, 95%, 99%):\n")
+print(result_gh$critical_values)
 
+# Grid and density
+x_vals <- seq(-0.5, 0.5, length.out = 10000)
+dens_vals <- cos_density(x_vals, cf_fit, a, b, N = 1024)
 
-# Define CGMY CDF wrapper from COS table
+# Compute CDF from density
+dx <- diff(x_vals)[1]
+cdf_vals <- cumsum(dens_vals) * dx
+cdf_vals <- cdf_vals / max(cdf_vals)  # normalize to [0,1]
+
+# Define CGMY CDF
 cgmy_cdf_func <- function(x) {
   sapply(x, function(xi) {
     if (xi <= min(x_vals)) return(0)
@@ -66,10 +100,11 @@ cgmy_rgen <- function(n) {
 }
 
 
-# CvM test
+# Apply CvM test
+set.seed(7914) # For reproducibility
 cvm.test(log_returns, null = cgmy_cdf_func, estimated = TRUE)
 
-# AD test
+# Apply AD test
 result_cgmy <- ad_test_monte_carlo(
   sample   = log_returns,
   cdf_fun  = cgmy_cdf_func,
@@ -78,7 +113,7 @@ result_cgmy <- ad_test_monte_carlo(
   seed     = 7914
 )
 
-# Show results
+# Print results
 cat("Anderson–Darling statistic (CGMY):", result_cgmy$ad_statistic, "\n")
 cat("p-value:", result_cgmy$p_value, "\n")
 cat("Critical values (90%, 95%, 99%):\n")
@@ -89,10 +124,11 @@ print(result_cgmy$critical_values)
 stable_cdf <- function(x) pstable(x, alpha_stable, beta_stable, c_stable, mu_stable)
 stable_rgen <- function(n) rstable(n, alpha_stable, beta_stable, c_stable, mu_stable)
 
-# CvM test
+# Apply CvM test
+set.seed(7914) # For reproducibility
 cvm.test(log_returns, null = stable_cdf, estimated = TRUE)
 
-# AD test
+# Apply AD test
 result_stable <- ad_test_monte_carlo(
   sample   = log_returns,
   cdf_fun  = stable_cdf,
@@ -101,7 +137,7 @@ result_stable <- ad_test_monte_carlo(
   seed     = 7914
 )
 
-# Output results
+# Print results
 cat("Anderson–Darling statistic (α-Stable):", result_stable$ad_statistic, "\n")
 cat("p-value:", result_stable$p_value, "\n")
 cat("Critical values (90%, 95%, 99%):\n")
@@ -118,18 +154,17 @@ dejd_cdf <- function(x) {
   })
 }
 
-
 # Define RNG function using inverse CDF
 dejd_rgen <- function(n) {
   u <- runif(n)
   de_quantile(u, p = p, eta1 = eta1, eta2 = eta2)
 }
 
-
-# CvM test
+# Apply CvM test
+set.seed(7914) # For reproducibility
 cvm.test(log_returns, null = dejd_cdf, estimated = TRUE)
 
-# AD test
+# Apply AD test
 result_dejd <- ad_test_monte_carlo(
   sample   = log_returns,
   cdf_fun  = dejd_cdf,
@@ -138,7 +173,7 @@ result_dejd <- ad_test_monte_carlo(
   seed     = 7914
 )
 
-# Output the results
+# Print results
 cat("Anderson–Darling statistic (DEJD):", result_dejd$ad_statistic, "\n")
 cat("p-value:", result_dejd$p_value, "\n")
 cat("Critical values (90%, 95%, 99%):\n")
