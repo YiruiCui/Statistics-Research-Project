@@ -1,102 +1,36 @@
+# ----------------------------------------------
+# Estimate BNS-IG parameters from S&P 500 data using Particle Filter based MLE
+# ----------------------------------------------
+
+# NOTE: Particle filtering is computationally intensive. (usually take ~8h to run)
+# For a quick test, change line 129 n_particles to 100 and line 137 maxit to 20 (~1min run, poor result)
+
+# --- Import required package ---
 library(here)
 library(tidyverse)
 library(ghyp)
 library(SuppDists)
 library(gridExtra)
-library(moments)
 
-set.seed(7914)
+set.seed(7914) # For reproducibility
 
-# --- Load and Prepare Data ---
+# Identify project location
 here::i_am("analysis/model_SP500_BNS-IG(MLE-PF).R")
+
+# --- Load daily price data ---
 data <- readr::read_csv(here("data", "SP500.csv"))
 price_vector <- data$Last_Price[18080:nrow(data)]
+
+# --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
-# --- Helper Function to Simulate the IG-OU BDLP Increment ---
-# Implements the decomposition z = z^(1) + z^(2) from Schoutens (2003), Section 5.5.2.
-# Note: The 'dt' here corresponds to the time-scaled dt (i.e., lambda * dt).
-simulate_ig_ou_bdlp_increment <- function(n, dt, a_ig, b_ig) {
-  
-  # --- Component 1: An IG-Lévy process z^(1) ---
-  # According to Schoutens, the increment's distribution is IG(A, B) where
-  # A = (a_ig / 2) * dt and B = b_ig .
-  A <- (a_ig / 2) * dt
-  B <- b_ig
-  
-  # CONVERSION to the (nu, lambda) parameterization for rinvGauss
-  # nu (mean) = A / B
-  # lambda (shape) = A^2
-  nu_param <- A / B
-  lambda_param <- A^2
-  
-  z1_increments <- SuppDists::rinvGauss(
-    n, 
-    nu = nu_param, 
-    lambda = lambda_param
-  )
-  
-  # --- Component 2: A compound Poisson process z^(2) ---
-  # Jump intensity is (a*b)/2.
-  jump_intensity_z2 <- 1/(a_ig * b_ig / 2) * dt
-  num_jumps_z2 <- rpois(n, jump_intensity_z2)
-  
-  # Jump sizes are b_ig^-2 * v_n^2, where v_n are standard normal[cite: 2095].
-  jump_sizes_z2 <- sapply(num_jumps_z2, function(nj) {
-    if (nj == 0) return(0)
-    sum((1 / b_ig^2) * (rnorm(nj)^2))
-  })
-  
-  return(z1_increments + jump_sizes_z2)
-}
+# --- Fit Generalized Hyperbolic distribution for plot comparison ---
+gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 
-# --- BNS Simulation Function with IG Stochastic Volatility ---
-simulate_bns_ig_sv <- function(params, n_steps, dt) {
-  # Unpack parameters
-  mu        <- params[1]
-  rho       <- params[2]
-  lambda    <- params[3] # Mean-reversion speed for volatility
-  a_ig      <- params[4] # 'a' parameter of the marginal IG(a,b) distribution
-  b_ig      <- params[5] # 'b' parameter of the marginal IG(a,b) distribution
-  sigma0_sq <- params[6] # Initial variance
-  
-  # Initialize vectors for the simulation path
-  log_S <- numeric(n_steps + 1)
-  sigma_sq <- numeric(n_steps + 1)
-  log_S[1] <- 0
-  sigma_sq[1] <- sigma0_sq
-  
-  # --- Simulate all Background Driving Lévy Process (BDLP) increments ---
-  bdlp_increments <- simulate_ig_ou_bdlp_increment(
-    n = n_steps, 
-    dt = lambda * dt, 
-    a_ig = a_ig, 
-    b_ig = b_ig
-  )
-  
-  # Generate standard normal random variables for the main Brownian motion
-  dW <- rnorm(n_steps, mean = 0, sd = sqrt(dt))
-  
-  # --- Euler-Maruyama Discretization for the BNS System ---
-  for (t in 1:n_steps) {
-    sigma_sq_prev <- max(1e-9, sigma_sq[t])
-    
-    # Update variance process (IG-OU)
-    # d(sigma_t^2) = -lambda * sigma_t^2 * dt + d(z_{lambda*t})
-    sigma_sq[t+1] <- sigma_sq[t] - lambda * sigma_sq_prev * dt + bdlp_increments[t]
-    
-    # Update log-return process (BNS)
-    # d(log S_t) = (mu - 0.5*sigma_t^2)dt + sigma_t*dW_t + rho*d(z_{lambda*t})
-    log_S[t+1] <- log_S[t] + (mu - 0.5 * sigma_sq_prev) * dt + 
-      sqrt(sigma_sq_prev) * dW[t] + 
-      rho * bdlp_increments[t]
-  }
-  
-  # Return the simulated log-returns
-  return(diff(log_S))
-}
+# --- Import BNS-IG Simulation Function ---
+source(here("src","BNS-IG.R"))
 
-# --- 2. Standard Particle Filter (SIR) Log-Likelihood Function ---
+# --- Standard Particle Filter (SIR) Log-Likelihood Function ---
 particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
   # Unpack parameters
   mu        <- params[1]
@@ -115,7 +49,7 @@ particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
   
   # Main Filtering Loop
   for (t in 1:n_obs) {
-    # --- Step 1: Prediction/Propagation (Propose) ---
+    # --- Step 1: Prediction/Propagation ---
     # Simulate the BDLP increment for each particle over a time step of lambda * dt
     bdlp_increments <- simulate_ig_ou_bdlp_increment(
       n = n_particles, 
@@ -124,25 +58,32 @@ particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
       b_ig = b_ig
     )
     
-    # Move all particles forward one step using the state equation (IG-OU process)
+    # Propagate each particle's state (variance) forward using its unique BDLP increment
     particles_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt) + bdlp_increments)
     
-    # --- Step 2: Weighting ---
+    # --- Step 2: Weighting & Update Log-Likelihood ---
+    # The weight is the probability of the observed return data[t], conditional
+    # on the particle's variance and the simulated jump (bdlp_increments).
     
+    # This is the mean of the Gaussian component of the return
     particle_means <- (mu - 0.5 * particles_sigma_sq) * dt + rho * bdlp_increments
     particle_sds <- sqrt(particles_sigma_sq * dt)
     
+    # The weight is the density of the observed return under this conditional distribution
     log_weights <- dnorm(data[t], mean = particle_means, sd = particle_sds, log = TRUE)
     
-    # Normalize weights to prevent numerical underflow
+    # Avoid numerical underflow by shifting log-weights
     max_log_weight <- max(log_weights)
     weights <- exp(log_weights - max_log_weight)
     
-    # --- Step 3: Update Log-Likelihood ---
-    if (sum(weights) == 0 || !is.finite(sum(weights))) return(1e9) # Add safety check
+    if (sum(weights) == 0 || !is.finite(sum(weights))) {
+      # If all weights are zero, the filter has failed. Return a large penalty.
+      return(1e9) 
+    }
+    # Update Log-Likelihood
     log_likelihood <- log_likelihood + max_log_weight + log(mean(weights))
     
-    # --- Step 4: Resampling ---
+    # --- Step 3: Resampling ---
     normalized_weights <- weights / sum(weights)
     indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = normalized_weights)
     particles_sigma_sq <- particles_sigma_sq[indices]
@@ -151,7 +92,7 @@ particle_filter_log_likelihood_ig <- function(params, data, n_particles) {
   return(-log_likelihood)
 }
 
-# --- 3. Define and Run the Optimization ---
+# --- Define and Run the Optimization ---
 mle_objective_function_pf_ig <- function(scaled_params, data, n_particles) {
   params <- numeric(6)
   params[1] <- scaled_params[1]
@@ -161,15 +102,21 @@ mle_objective_function_pf_ig <- function(scaled_params, data, n_particles) {
   params[5] <- exp(scaled_params[5])
   params[6] <- exp(scaled_params[6])
   
+  # Calculate the negative log-likelihood
   neg_log_lik <- particle_filter_log_likelihood_ig(params, data, n_particles)
   
+  # Print progress
   cat("Testing Params (IG):", round(params, 4), " | -LogLik (PF):", round(neg_log_lik, 4), "\n")
   
-  if (!is.finite(neg_log_lik)) return(1e9)
-  return(neg_log_lik)
+  if (!is.finite(neg_log_lik)) {
+    return(1e9) # Return a large penalty if likelihood is not finite
+  }
+  
+  return(neg_log_lik) 
 }
 
-# Initial parameters
+# --- Run the Optimization ---
+# Starting values on the transformed scale
 initial_scaled_params_ig <- c(
   mu = mean(log_returns),
   rho_trans = log(1.0), 
@@ -181,7 +128,6 @@ initial_scaled_params_ig <- c(
 
 n_particles <- 10000
 
-cat("\nStarting MLE optimization for BNS-IG via Standard Particle Filter...\n")
 mle_results_pf_ig <- optim(
   par = initial_scaled_params_ig,
   fn = mle_objective_function_pf_ig,
@@ -190,11 +136,6 @@ mle_results_pf_ig <- optim(
   method = "Nelder-Mead",
   control = list(maxit = 300, trace = 1) 
 )
-
-# --- 4. Display Results ---
-cat("\n--- APF MLE Optimization Finished ---\n")
-print("Optimal Scaled Parameters Found:")
-print(mle_results_pf_ig$par)
 
 # Transform parameters back to their original scale
 estimated_params_mle_pf_ig <- numeric(6)
@@ -206,25 +147,22 @@ estimated_params_mle_pf_ig[5] <- exp(mle_results_pf_ig$par[5])
 estimated_params_mle_pf_ig[6] <- exp(mle_results_pf_ig$par[6])
 names(estimated_params_mle_pf_ig) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
 
+# --- Display Results ---
 print("Optimal Interpretable Parameters (MLE):")
 print(estimated_params_mle_pf_ig)
 
 cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_pf_ig$value, "\n")
 
-cat("\nSimulating final BNS model path with estimated parameters...\n")
-
+# Simulate BNS process for comparison
 set.seed(7914)
-
 bns_returns <- simulate_bns_ig_sv(
   params = estimated_params_mle_pf_ig,
   n_steps = length(log_returns),
   dt = 1
 )
-cat("BNS simulation complete.\n")
 
 
 # --- Comparison Plots ---
-cat("Generating comparison plots...\n")
 
 # A. Density Overlay Plot
 x_grid <- seq(min(log_returns), max(log_returns), length.out = 500)
@@ -259,7 +197,7 @@ density_plot_hist_style <- ggplot(data.frame(value = log_returns), aes(x = value
 print(density_plot_hist_style)
 
 # B. Q-Q Plot Comparison
-# Generate random sample from the fitted GH model
+# Generate samples from the fitted GH model
 gh_samples <- rghyp(length(log_returns), object = gh_fit)
 
 # Prepare data for Q-Q plots

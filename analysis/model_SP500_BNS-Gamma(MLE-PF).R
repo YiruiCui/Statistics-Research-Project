@@ -1,3 +1,11 @@
+# ----------------------------------------------
+# Estimate BNS-Gamma parameters from S&P 500 data using Particle Filter based MLE
+# ----------------------------------------------
+
+# NOTE: Particle filtering is computationally intensive. (usually take ~8h to run)
+# For a quick test, change line 134 n_particles to 100 and line 143 maxit to 20 (~1min run, poor result)
+
+# --- Import required package ---
 library(here)
 library(tidyverse)
 library(ghyp)
@@ -15,50 +23,13 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
-# --- BNS Simulation Function ---
-simulate_bns_gamma_sv <- function(params, n_steps, dt) {
-  # Unpack parameters from the input vector
-  mu        <- params[1]
-  rho       <- params[2]
-  lambda    <- params[3]
-  a         <- params[4]
-  b         <- params[5]
-  sigma0_sq <- params[6]
-  
-  log_S <- numeric(n_steps + 1)
-  sigma_sq <- numeric(n_steps + 1)
-  log_S[1] <- 0
-  sigma_sq[1] <- sigma0_sq
-  
-  num_jumps <- rpois(n_steps, lambda * a * dt)
-  bdlp_increments <- sapply(num_jumps, function(nj) {
-    if (nj == 0) return(0)
-    # The total increment is the sum of the individual exponential jumps
-    sum(rgamma(nj, shape = 1, rate = b))
-  })
-  
-  dW <- rnorm(n_steps, mean = 0, sd = sqrt(dt))
-  
-  # --- Euler-Maruyama Discretization using the correct BDLP ---
-  for (t in 1:n_steps) {
-    sigma_sq_prev <- max(1e-9, sigma_sq[t])
-    
-    # Update variance process (dσ² = -λσ²dt + dz)
-    sigma_sq[t+1] <- sigma_sq[t] - lambda * sigma_sq_prev * dt + bdlp_increments[t]
-    
-    # Update log-price process (dZ = (μ - σ²/2)dt + σdW + ρdz) [cite: 2491]
-    log_S[t+1] <- log_S[t] + (mu - 0.5 * sigma_sq_prev) * dt + 
-      sqrt(sigma_sq_prev) * dW[t] + 
-      rho * bdlp_increments[t]
-  }
-  
-  return(diff(log_S))
-}
+# --- Fit Generalized Hyperbolic distribution for plot comparison ---
+gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 
-# --- 2. Particle Filter Log-Likelihood Function ---
-# This function approximates the log-likelihood of the data for a given
-# set of BNS parameters.
+# --- Import BNS Simulation Function ---
+source(here("src","BNS-Gamma.R"))
 
+# --- Standard Particle Filter (SIR) Log-Likelihood Function ---
 particle_filter_log_likelihood <- function(params, data, n_particles) {
   # Unpack parameters
   mu        <- params[1]
@@ -70,7 +41,7 @@ particle_filter_log_likelihood <- function(params, data, n_particles) {
   
   n_obs <- length(data)
   log_likelihood <- 0
-  dt <- 1 # Daily data
+  dt <- 1 
   
   # --- Initialization ---
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
@@ -78,24 +49,19 @@ particle_filter_log_likelihood <- function(params, data, n_particles) {
   # --- Main Filtering Loop ---
   for (t in 1:n_obs) {
     # --- Step 1: Prediction/Propagation ---
+    # Simulate the BDLP increment for each particle over a time step of lambda * dt
     num_jumps <- rpois(n_particles, lambda * a * dt)
     bdlp_increments <- sapply(num_jumps, function(nj) {
       if (nj == 0) return(0)
-      # The increment is the sum of Gamma(1,b) i.e. Exponential(b) jumps
       sum(rgamma(nj, shape = 1, rate = b))
     })
     
     # Propagate each particle's state (variance) forward using its unique BDLP increment
-    # dσ² = -λσ²dt + dz
     particles_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt) + bdlp_increments)
     
-    # --- Step 2: Weighting ---
-    
+    # --- Step 2: Weighting & Update Log-Likelihood ---
     # The weight is the probability of the observed return data[t], conditional
-    # on the particle's variance AND the simulated jump (bdlp_increments).
-    # We use the observation equation:
-    # Return = (μ - σ²/2)dt + σdW + ρdz
-    # So, the Gaussian part is: Return - (μ - σ²/2)dt - ρdz = σdW
+    # on the particle's variance and the simulated jump (bdlp_increments).
     
     # This is the mean of the Gaussian component of the return
     particle_means <- (mu - 0.5 * particles_sigma_sq) * dt + rho * bdlp_increments
@@ -108,14 +74,14 @@ particle_filter_log_likelihood <- function(params, data, n_particles) {
     max_log_weight <- max(log_weights)
     weights <- exp(log_weights - max_log_weight)
     
-    # --- Step 3: Update Log-Likelihood & Resample ---
     if (sum(weights) == 0 || !is.finite(sum(weights))) {
       # If all weights are zero, the filter has failed. Return a large penalty.
       return(1e9) 
     }
-    
+    # Update Log-Likelihood
     log_likelihood <- log_likelihood + max_log_weight + log(mean(weights))
     
+    # --- Step 3: Resampling ---
     # Resample particles based on their weights
     normalized_weights <- weights / sum(weights)
     indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = normalized_weights)
@@ -126,7 +92,7 @@ particle_filter_log_likelihood <- function(params, data, n_particles) {
 }
 
 
-# --- 3. Define the MLE Objective Function ---
+# --- Define the MLE Objective Function ---
 mle_objective_function <- function(scaled_params, data, n_particles) {
   
   # Unscale parameters to their natural domain
@@ -151,7 +117,7 @@ mle_objective_function <- function(scaled_params, data, n_particles) {
   return(neg_log_lik)
 }
 
-# --- 4. Run the Optimization ---
+# --- Run the Optimization ---
 # Starting values on the transformed scale
 initial_scaled_params <- c(
   mu = mean(log_returns),
@@ -162,13 +128,9 @@ initial_scaled_params <- c(
   log_sigma0_sq = log(var(log_returns))
 )
 
-# NOTE: Particle filtering is computationally intensive.
-# For a real estimation, n_particles should be higher (e.g., 5000+) and
-# the optimization will take a very long time.
-n_particles <- 10000 
+n_particles <- 10000
 
-cat("\nStarting MLE optimization via Particle Filter (this will be very slow)...\n")
-mle_results <- optim(
+mle_results_pf_gamma <- optim(
   par = initial_scaled_params,
   fn = mle_objective_function,
   # Additional arguments for the objective function
@@ -177,11 +139,6 @@ mle_results <- optim(
   method = "Nelder-Mead",
   control = list(maxit = 200, trace = 1)
 )
-
-# --- 5. Display Results ---
-cat("\n--- MLE Optimization Finished ---\n")
-print("Optimal Scaled Parameters Found:")
-print(mle_results_pf_gamma$par)
 
 # Transform parameters back to their original scale
 estimated_params_mle_pf_gamma <- numeric(6)
@@ -193,25 +150,21 @@ estimated_params_mle_pf_gamma[5] <- exp(mle_results_pf_gamma$par[5])
 estimated_params_mle_pf_gamma[6] <- exp(mle_results_pf_gamma$par[6])
 names(estimated_params_mle_pf_gamma) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
 
+# --- Display Results ---
 print("Optimal Interpretable Parameters (MLE):")
 print(estimated_params_mle_pf_gamma)
 
 cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_pf_gamma$value, "\n")
 
-cat("\nSimulating final BNS model path with estimated parameters...\n")
-
+# Simulate BNS process for comparison
 set.seed(7914)
-
 bns_returns <- simulate_bns_gamma_sv(
   params = estimated_params_mle_pf_gamma,
   n_steps = length(log_returns),
   dt = 1
 )
-cat("BNS simulation complete.\n")
-
 
 # --- Comparison Plots ---
-cat("Generating comparison plots...\n")
 
 # A. Density Overlay Plot
 x_grid <- seq(min(log_returns), max(log_returns), length.out = 500)
@@ -246,7 +199,7 @@ density_plot_hist_style <- ggplot(data.frame(value = log_returns), aes(x = value
 print(density_plot_hist_style)
 
 # B. Q-Q Plot Comparison
-# Generate random sample from the fitted GH model
+# Generate samples from the fitted GH model
 gh_samples <- rghyp(length(log_returns), object = gh_fit)
 
 # Prepare data for Q-Q plots
@@ -313,7 +266,7 @@ acf_plot <- ggplot(acf_data, aes(x = Lag, y = ACF, fill = Model)) +
 
 print(acf_plot)
 
-## Save plots
+# --- Save plots ---
 ggsave(
   filename = here("outputs", "BNS-gamma(MLE-PF-10000p)&GH_fit.png"),
   plot = density_plot_hist_style,

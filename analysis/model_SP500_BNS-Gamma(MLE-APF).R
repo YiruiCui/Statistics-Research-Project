@@ -1,8 +1,17 @@
+# ----------------------------------------------
+# Estimate BNS-Gamma parameters from S&P 500 data using Auxiliary Particle Filter based MLE
+# ----------------------------------------------
+
+# NOTE: Auxiliary Particle filtering is computationally intensive. (usually take ~8h to run)
+# For a quick test, change line 156 n_particles to 100 and line 164 maxit to 20 (~1min run, poor result)
+
+# --- Import required package ---
 library(here)
 library(tidyverse)
 library(ghyp)
+library(gridExtra)
 
-set.seed(7914)
+set.seed(7914) # For reproducibility
 
 # Identify project location
 here::i_am("analysis/model_SP500_BNS-Gamma(MLE-APF).R")
@@ -14,9 +23,13 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
+# --- Fit Generalized Hyperbolic distribution for plot comparison ---
+gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
 
-# --- 2. Auxiliary Particle Filter Log-Likelihood Function ---
+# --- Import BNS-Gamma Simulation Function ---
+source(here("src","BNS-Gamma.R"))
 
+# --- Auxiliary Particle Filter (APF) Log-Likelihood Function ---
 auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) {
   # Unpack parameters
   mu        <- params[1]
@@ -28,7 +41,7 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
   
   n_obs <- length(data)
   log_likelihood <- 0
-  dt <- 1 # Daily data
+  dt <- 1 
   
   # --- Initialization ---
   particles_sigma_sq <- rep(sigma0_sq, n_particles)
@@ -37,13 +50,12 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
   for (t in 1:n_obs) {
     # --- Stage 1: Auxiliary Step (The "Look-Ahead") ---
     
-    # 1a. Make a SIMPLIFIED prediction of the mean state at time t, based on particles at t-1.
-    # This is often just the mean of the transition, ignoring the random jumps for now.
+    # 1a. Make a simplified prediction of the mean state at time t, based on particles at t-1.
     predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
-    predicted_means <- (mu - 0.5 * predicted_sigma_sq) * dt # Mean of the Gaussian part, ignoring jumps
+    predicted_means <- (mu - 0.5 * predicted_sigma_sq) * dt 
     predicted_sds <- sqrt(predicted_sigma_sq * dt)
     
-    # 1b. Calculate first-stage weights using the CURRENT observation data[t].
+    # 1b. Calculate first-stage weights using the current observation data[t].
     # These weights determine which particles at t-1 are good "ancestors".
     log_first_stage_weights <- dnorm(data[t], mean = predicted_means, sd = predicted_sds, log = TRUE)
     
@@ -51,7 +63,7 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
     max_log_weight <- max(log_first_stage_weights)
     first_stage_weights <- exp(log_first_stage_weights - max_log_weight)
     
-    # 1c. Resample the ANCESTOR indices from t-1 based on the first-stage weights.
+    # 1c. Resample the ancestor indices from t-1 based on the first-stage weights.
     if (sum(first_stage_weights) == 0 || !is.finite(sum(first_stage_weights))) return(1e9)
     ancestor_indices <- sample(1:n_particles, 
                                size = n_particles, 
@@ -60,7 +72,7 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
     
     # --- Stage 2: Propagation and Final Weighting ---
     
-    # 2a. Propagate ONLY the chosen ancestor particles forward using the FULL model dynamics.
+    # 2a. Propagate only the chosen ancestor particles forward using the full model dynamics.
     propagated_particles <- particles_sigma_sq[ancestor_indices]
     
     # Simulate the BDLP increment for the chosen particles.
@@ -70,7 +82,7 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
       sum(rgamma(nj, shape = 1, rate = b))
     })
     
-    # This is our new cloud of particles at time t.
+    # Generate new cloud of particles at time t.
     new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda * dt) + bdlp_increments)
     
     # 2b. Calculate second-stage (correction) weights.
@@ -111,12 +123,7 @@ auxiliary_particle_filter_log_likelihood <- function(params, data, n_particles) 
   return(-log_likelihood)
 }
 
-# --- 3. Define and Run the Optimization ---
-# (The objective function and optimization call would be the same as in the
-# previous script, but would call `auxiliary_particle_filter_log_likelihood`
-# instead of the standard one).
-
-# We can define the objective function
+# --- Define the MLE Objective Function ---
 mle_objective_function_apf <- function(scaled_params, data, n_particles) {
   params <- numeric(6)
   params[1] <- scaled_params[1]
@@ -134,7 +141,8 @@ mle_objective_function_apf <- function(scaled_params, data, n_particles) {
   return(neg_log_lik)
 }
 
-# Initial parameters (same as before)
+# --- Run the Optimization ---
+# Starting values on the transformed scale
 initial_scaled_params <- c(
   mu = mean(log_returns),
   rho_trans = log(0.5), 
@@ -146,7 +154,6 @@ initial_scaled_params <- c(
 
 n_particles <- 10000
 
-cat("\nStarting MLE optimization via Auxiliary Particle Filter (this will be very slow)...\n")
 mle_results_apf_gamma <- optim(
   par = initial_scaled_params,
   fn = mle_objective_function_apf,
@@ -155,11 +162,6 @@ mle_results_apf_gamma <- optim(
   method = "Nelder-Mead",
   control = list(maxit = 200, trace = 1)
 )
-
-# --- 4. Display Results ---
-cat("\n--- APF MLE Optimization Finished ---\n")
-print("Optimal Scaled Parameters Found:")
-print(mle_results_apf_gamma$par)
 
 # Transform parameters back to their original scale
 estimated_params_mle_apf_gamma <- numeric(6)
@@ -171,25 +173,22 @@ estimated_params_mle_apf_gamma[5] <- exp(mle_results_apf_gamma$par[5])
 estimated_params_mle_apf_gamma[6] <- exp(mle_results_apf_gamma$par[6])
 names(estimated_params_mle_apf_gamma) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
 
+# --- Display Results ---
 print("Optimal Interpretable Parameters (MLE):")
 print(estimated_params_mle_apf_gamma)
 
 cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_apf_gamma$value, "\n")
 
-cat("\nSimulating final BNS model path with estimated parameters...\n")
-
+# Simulate BNS process for comparison
 set.seed(7914)
-
 bns_returns <- simulate_bns_gamma_sv(
   params = estimated_params_mle_apf_gamma,
   n_steps = length(log_returns),
   dt = 1
 )
-cat("BNS simulation complete.\n")
 
 
 # --- Comparison Plots ---
-cat("Generating comparison plots...\n")
 
 # A. Density Overlay Plot
 x_grid <- seq(min(log_returns), max(log_returns), length.out = 500)
@@ -224,7 +223,7 @@ density_plot_hist_style <- ggplot(data.frame(value = log_returns), aes(x = value
 print(density_plot_hist_style)
 
 # B. Q-Q Plot Comparison
-# Generate random sample from the fitted GH model
+# Generate samples from the fitted GH model
 gh_samples <- rghyp(length(log_returns), object = gh_fit)
 
 # Prepare data for Q-Q plots

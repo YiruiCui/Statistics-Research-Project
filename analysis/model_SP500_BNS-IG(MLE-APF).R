@@ -1,10 +1,18 @@
+# ----------------------------------------------
+# Estimate BNS-IG parameters from S&P 500 data using Particle Filter based MLE
+# ----------------------------------------------
+
+# NOTE: Particle filtering is computationally intensive. (usually take ~8h to run)
+# For a quick test, change line 147 n_particles to 100 and line 155 maxit to 20 (~1min run, poor result)
+
+# --- Import required package ---
 library(here)
 library(tidyverse)
 library(ghyp)
 library(gridExtra)
-library(SuppDists) # For rinvGauss function
+library(SuppDists)
 
-set.seed(7914)
+set.seed(7914) # For reproducibility
 
 # Identify project location
 here::i_am("analysis/model_SP500_BNS-IG(MLE-APF).R")
@@ -16,7 +24,13 @@ price_vector <- data$Last_Price[18080:nrow(data)]
 # --- Compute log-returns ---
 log_returns <- diff(log(price_vector))
 
-# --- 2. Auxiliary Particle Filter for BNS with IG-SV ---
+# --- Fit Generalized Hyperbolic distribution for plot comparison ---
+gh_fit <- fit.ghypuv(log_returns, lambda = -0.5, symmetric = FALSE)
+
+# --- Import BNS-IG Simulation Function ---
+source(here("src","BNS-IG.R"))
+
+# --- Auxiliary Particle Filter (APF) for BNS with IG-SV ---
 apf_log_likelihood_ig <- function(params, data, n_particles) {
   # Unpack parameters
   mu        <- params[1]
@@ -38,36 +52,35 @@ apf_log_likelihood_ig <- function(params, data, n_particles) {
     # --- Stage 1: Auxiliary Step (Look-Ahead) ---
     
     # 1a. Make a simplified prediction of the state at time t, based on particles at t-1.
-    # This prediction ignores the random jumps to create a tractable "first-guess".
     predicted_sigma_sq <- pmax(1e-9, particles_sigma_sq * (1 - lambda * dt))
-    # Note: The mean of the return also ignores the jump term for this first stage.
     predicted_means <- (mu - 0.5 * predicted_sigma_sq) * dt
     predicted_sds <- sqrt(predicted_sigma_sq * dt)
     
-    # 1b. Calculate first-stage weights using the CURRENT observation data[t].
+    # 1b. Calculate first-stage weights using the current observation data[t].
+    # These weights determine which particles at t-1 are good "ancestors".
     log_first_stage_weights <- dnorm(data[t], mean = predicted_means, sd = predicted_sds, log = TRUE)
     
-    # Normalize
+    # Normalize weights
     max_log_weight <- max(log_first_stage_weights, na.rm = TRUE)
     if (!is.finite(max_log_weight)) return(1e9)
     first_stage_weights <- exp(log_first_stage_weights - max_log_weight)
     
-    # 1c. Resample ancestor indices from t-1 based on these "look-ahead" weights.
+    # 1c. Resample the ancestor indices from t-1 based on the first-stage weights.
     if (sum(first_stage_weights) == 0 || !is.finite(sum(first_stage_weights))) return(1e9)
     ancestor_indices <- sample(1:n_particles, size = n_particles, replace = TRUE, prob = first_stage_weights)
     
     # --- Stage 2: Propagation and Correction ---
     
-    # 2a. Propagate ONLY the chosen ancestors using the FULL model dynamics.
+    # 2a. Propagate only the chosen ancestors using the full model dynamics.
     propagated_particles <- particles_sigma_sq[ancestor_indices]
     
     # Simulate the BDLP increment for the chosen particles.
     bdlp_increments <- simulate_ig_ou_bdlp_increment(n_particles, lambda * dt, a_ig, b_ig)
     
+    # Generate new cloud of particles at time t.
     new_particles_sigma_sq <- pmax(1e-9, propagated_particles * (1 - lambda * dt) + bdlp_increments)
     
     # 2b. Calculate second-stage (correction) weights.
-    # CRITICAL FIX: The mean now includes the jump term rho * dz.
     new_means <- (mu - 0.5 * new_particles_sigma_sq) * dt + rho * bdlp_increments
     new_sds <- sqrt(new_particles_sigma_sq * dt)
     log_numerator_weights <- dnorm(data[t], mean = new_means, sd = new_sds, log = TRUE)
@@ -102,14 +115,14 @@ apf_log_likelihood_ig <- function(params, data, n_particles) {
   return(-log_likelihood)
 }
 
-# --- 3. Define and Run the Optimization ---
+# --- Define the MLE Objective Function ---
 mle_objective_function_apf_ig <- function(scaled_params, data, n_particles) {
   params <- numeric(6)
   params[1] <- scaled_params[1]
   params[2] <- -exp(scaled_params[2])
   params[3] <- exp(scaled_params[3])
-  params[4] <- exp(scaled_params[4]) # a_ig
-  params[5] <- exp(scaled_params[5]) # b_ig
+  params[4] <- exp(scaled_params[4]) 
+  params[5] <- exp(scaled_params[5]) 
   params[6] <- exp(scaled_params[6])
   
   neg_log_lik <- apf_log_likelihood_ig(params, data, n_particles)
@@ -120,7 +133,8 @@ mle_objective_function_apf_ig <- function(scaled_params, data, n_particles) {
   return(neg_log_lik)
 }
 
-# Initial parameters (plausible guesses for IG-OU)
+# --- Run the Optimization ---
+# Starting values on the transformed scale
 initial_scaled_params_ig <- c(
   mu = mean(log_returns),
   rho_trans = log(0.5), 
@@ -132,7 +146,6 @@ initial_scaled_params_ig <- c(
 
 n_particles <- 10000
 
-cat("\nStarting MLE optimization for BNS-IG via APF (this will be slow)...\n")
 mle_results_apf_ig <- optim(
   par = initial_scaled_params_ig,
   fn = mle_objective_function_apf_ig,
@@ -141,11 +154,6 @@ mle_results_apf_ig <- optim(
   method = "Nelder-Mead",
   control = list(maxit = 200, trace = 1) 
 )
-
-# --- 4. Display Results ---
-cat("\n--- APF MLE Optimization Finished ---\n")
-print("Optimal Scaled Parameters Found:")
-print(mle_results_apf_ig$par)
 
 # Transform parameters back to their original scale
 estimated_params_mle_apf_ig <- numeric(6)
@@ -157,25 +165,22 @@ estimated_params_mle_apf_ig[5] <- exp(mle_results_apf_ig$par[5])
 estimated_params_mle_apf_ig[6] <- exp(mle_results_apf_ig$par[6])
 names(estimated_params_mle_apf_ig) <- c("mu", "rho", "lambda", "a", "b", "sigma0_sq")
 
+# --- Display Results ---
 print("Optimal Interpretable Parameters (MLE):")
 print(estimated_params_mle_apf_ig)
 
 cat("\nFinal Minimized Negative Log-Likelihood:", mle_results_apf_ig$value, "\n")
 
-cat("\nSimulating final BNS model path with estimated parameters...\n")
-
+# Simulate BNS process for comparison
 set.seed(7914)
-
 bns_returns <- simulate_bns_ig_sv(
   params = estimated_params_mle_apf_ig,
   n_steps = length(log_returns),
   dt = 1
 )
-cat("BNS simulation complete.\n")
 
 
 # --- Comparison Plots ---
-cat("Generating comparison plots...\n")
 
 # A. Density Overlay Plot
 x_grid <- seq(min(log_returns), max(log_returns), length.out = 500)
@@ -210,7 +215,7 @@ density_plot_hist_style <- ggplot(data.frame(value = log_returns), aes(x = value
 print(density_plot_hist_style)
 
 # B. Q-Q Plot Comparison
-# Generate random sample from the fitted GH model
+# Generate samples from the fitted GH model
 gh_samples <- rghyp(length(log_returns), object = gh_fit)
 
 # Prepare data for Q-Q plots
