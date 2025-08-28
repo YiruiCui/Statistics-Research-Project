@@ -105,7 +105,7 @@ q_theoretical <- meixner_qf_m(p_vals)
 
 # Plot Q–Q
 plot(q_theoretical, log_returns_sorted,
-     main = "Q-Q Plot: GH Fit vs Empirical Returns",
+     main = "Q-Q Plot: Meixner Fit vs Empirical Returns",
      xlab = "Theoretical Quantiles",
      ylab = "Empirical Quantiles",
      pch = 16, col = "darkblue", cex = 0.6)
